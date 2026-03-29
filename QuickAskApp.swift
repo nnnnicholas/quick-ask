@@ -246,7 +246,7 @@ final class QuickAskAppSettings: ObservableObject {
     }
 
     var requiresInitialSetup: Bool {
-        !setupCompleted || !canContinuePastSetup
+        !canContinuePastSetup
     }
 
     var archiveDirectorySummary: String {
@@ -1283,7 +1283,7 @@ struct QuickAskSettingsView: View {
                             Text("CLI Providers")
                                 .font(.system(size: 13, weight: .semibold))
                                 .foregroundStyle(QuickAskTheme.strongText)
-                            Text("Quick Ask reuses whatever Claude, Codex/ChatGPT, Gemini, and Ollama access already exists on this Mac.")
+                            Text("Quick Ask reuses whatever Claude, Codex/ChatGPT, Gemini, and Ollama access already exists on this Mac. Provider setup here is optional.")
                                 .font(.system(size: 11))
                                 .foregroundStyle(QuickAskTheme.mutedText)
                                 .fixedSize(horizontal: false, vertical: true)
@@ -1941,6 +1941,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     private let panelBottomYKey = "QuickAskPanelBottomY"
     private let uiTestMode = ProcessInfo.processInfo.environment["QUICK_ASK_UI_TEST_MODE"] == "1"
     private let uiTestSingletonMode = ProcessInfo.processInfo.environment["QUICK_ASK_UI_TEST_ENABLE_SINGLETON"] == "1"
+    private let uiTestForceSetupGate = ProcessInfo.processInfo.environment["QUICK_ASK_UI_TEST_FORCE_SETUP_GATE"] == "1"
     private var singletonLockFileDescriptor: Int32 = -1
     private var frontmostAppName = ""
 
@@ -2252,7 +2253,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     }
 
     private func shouldGateOnSetup() -> Bool {
-        settings.requiresInitialSetup
+        if uiTestMode && uiTestForceSetupGate {
+            return true
+        }
+        return settings.requiresInitialSetup
     }
 
     private func launchProviderSetup(for providerID: String) {

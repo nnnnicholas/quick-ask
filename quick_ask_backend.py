@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import functools
 import http.client
 import json
 import os
@@ -93,6 +94,15 @@ GEMINI_MODELS: list[dict[str, Any]] = [
         "model": "gemini-3-flash-preview",
         "label": "Gemini 3 Flash",
         "short_label": "Gemini 3 Flash",
+        "hint": None,
+        "default": False,
+    },
+    {
+        "id": "gemini::gemini-2.5-flash-lite",
+        "provider": "gemini",
+        "model": "gemini-2.5-flash-lite",
+        "label": "Gemini Flash Lite",
+        "short_label": "Gemini Flash Lite",
         "hint": None,
         "default": False,
     },
@@ -246,6 +256,70 @@ def run_subprocess(
     )
 
 
+@functools.lru_cache(maxsize=1)
+def login_shell_path_entries() -> tuple[str, ...]:
+    try:
+        result = subprocess.run(
+            ["/bin/zsh", "-lc", "printf %s \"$PATH\""],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=5.0,
+        )
+    except Exception:
+        return ()
+    return tuple(entry for entry in result.stdout.strip().split(":") if entry)
+
+
+def merged_path_entries(*command_names: str) -> list[str]:
+    seen: set[str] = set()
+    entries: list[str] = []
+
+    def add(entry: str | pathlib.Path | None) -> None:
+        if entry is None:
+            return
+        text = str(entry).strip()
+        if not text or text in seen:
+            return
+        seen.add(text)
+        entries.append(text)
+
+    for entry in os.environ.get("PATH", "").split(":"):
+        add(entry)
+    for entry in login_shell_path_entries():
+        add(entry)
+
+    for name in command_names:
+        resolved = command_path(name)
+        if resolved:
+            add(pathlib.Path(resolved).parent)
+
+    node_path = command_path("node")
+    if node_path:
+        add(pathlib.Path(node_path).parent)
+
+    common_dirs = [
+        pathlib.Path.home() / ".local/bin",
+        pathlib.Path("/opt/homebrew/bin"),
+        pathlib.Path("/usr/local/bin"),
+        pathlib.Path("/usr/bin"),
+        pathlib.Path("/bin"),
+        pathlib.Path("/usr/sbin"),
+        pathlib.Path("/sbin"),
+    ]
+    for directory in common_dirs:
+        if directory.exists():
+            add(directory)
+
+    return entries
+
+
+def provider_runtime_env(*command_names: str) -> dict[str, str]:
+    env = subscription_only_env()
+    env["PATH"] = ":".join(merged_path_entries(*command_names))
+    return env
+
+
 def last_json_line(text: str) -> dict[str, Any] | None:
     stripped = text.strip()
     if stripped.startswith("{") and stripped.endswith("}"):
@@ -293,7 +367,7 @@ def claude_provider_status() -> dict[str, Any]:
     try:
         result = run_subprocess(
             [claude, "auth", "status", "--json"],
-            env=subscription_only_env(),
+            env=provider_runtime_env("claude"),
             timeout=10.0,
         )
     except Exception as exc:
@@ -332,7 +406,7 @@ def codex_provider_status() -> dict[str, Any]:
         }
 
     try:
-        result = run_subprocess([codex, "login", "status"], env=subscription_only_env(), timeout=10.0)
+        result = run_subprocess([codex, "login", "status"], env=provider_runtime_env("codex"), timeout=10.0)
     except Exception as exc:
         return {
             "id": "codex",
@@ -514,7 +588,7 @@ def stream_claude(model: str, history: list[dict[str, str]]) -> int:
     proc = subprocess.Popen(
         command,
         cwd=str(safe_cwd),
-        env=subscription_only_env(),
+        env=provider_runtime_env("claude"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
@@ -598,7 +672,7 @@ def stream_codex(model: str, history: list[dict[str, str]]) -> int:
     proc = subprocess.Popen(
         command,
         cwd=str(safe_cwd),
-        env=subscription_only_env(),
+        env=provider_runtime_env("codex"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,
@@ -672,7 +746,7 @@ def stream_gemini(model: str, history: list[dict[str, str]]) -> int:
     proc = subprocess.Popen(
         command,
         cwd=str(safe_cwd),
-        env=subscription_only_env(),
+        env=provider_runtime_env("gemini", "node"),
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         stdin=subprocess.DEVNULL,

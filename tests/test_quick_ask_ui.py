@@ -30,7 +30,13 @@ def activate_app(app_name: str) -> None:
 
 
 class QuickAskHarness:
-    def __init__(self, *, enable_singleton: bool = False, initial_setup_complete: bool = True) -> None:
+    def __init__(
+        self,
+        *,
+        enable_singleton: bool = False,
+        initial_setup_complete: bool = True,
+        seed_archive_dir: bool | None = None,
+    ) -> None:
         self.temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-ui-")
         base = Path(self.temp_dir.name)
         self.state_path = base / "state.json"
@@ -40,6 +46,7 @@ class QuickAskHarness:
         self.command_id = 0
         self.enable_singleton = enable_singleton
         self.initial_setup_complete = initial_setup_complete
+        self.seed_archive_dir = initial_setup_complete if seed_archive_dir is None else seed_archive_dir
         self.defaults_suite = f"app.quickask.tests.{uuid.uuid4().hex}"
         self.stopped_agents = [path for path in LAUNCH_AGENTS if path.exists() and self._launch_agent_is_loaded(path)]
 
@@ -98,9 +105,10 @@ class QuickAskHarness:
         self.archive_dir.mkdir(parents=True, exist_ok=True)
         run_command(["defaults", "delete", self.defaults_suite])
         run_command(["defaults", "write", self.defaults_suite, "QuickAskHistoryEnabled", "-bool", "YES"])
+        if self.seed_archive_dir:
+            run_command(["defaults", "write", self.defaults_suite, "QuickAskCustomArchiveDirectory", "-string", str(self.archive_dir)])
         if self.initial_setup_complete:
             run_command(["defaults", "write", self.defaults_suite, "QuickAskSetupCompleted", "-bool", "YES"])
-            run_command(["defaults", "write", self.defaults_suite, "QuickAskCustomArchiveDirectory", "-string", str(self.archive_dir)])
         else:
             run_command(["defaults", "write", self.defaults_suite, "QuickAskSetupCompleted", "-bool", "NO"])
 
@@ -322,6 +330,13 @@ class QuickAskUITests(unittest.TestCase):
 
             shown = app.command("show_panel")
             self.assertTrue(shown["panelVisible"])
+
+    def test_archive_ready_state_allows_panel_without_forcing_setup_completion(self) -> None:
+        with QuickAskHarness(initial_setup_complete=False, seed_archive_dir=True) as app:
+            shown = app.command("show_panel")
+            self.assertTrue(shown["panelVisible"])
+            self.assertFalse(shown["settingsWindowVisible"])
+            self.assertFalse(shown["setupRequired"])
 
     def test_setup_gate_allows_disabling_history_instead_of_picking_folder(self) -> None:
         with QuickAskHarness(initial_setup_complete=False) as app:
