@@ -312,6 +312,32 @@ class QuickAskUITests(unittest.TestCase):
             self.assertEqual(done["queuedCount"], 0)
             self.assertEqual(done["messageCount"], 2)
 
+    def test_per_item_queue_actions_target_only_selected_prompt(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="first prompt")
+            app.command("submit")
+
+            app.command("set_input", text="second prompt")
+            app.command("submit")
+            app.command("set_input", text="third prompt")
+            queued = app.command("submit")
+            self.assertEqual(queued["queuedPromptContents"], ["second prompt", "third prompt"])
+
+            canceled = app.command("cancel_queue_item", text="second prompt")
+            self.assertEqual(canceled["queuedPromptContents"], ["third prompt"])
+            self.assertEqual(canceled["queuedCount"], 1)
+            self.assertTrue(canceled["isGenerating"])
+
+            steered = app.command("steer_queue_item", text="third prompt")
+            self.assertEqual(steered["queuedPromptContents"], [])
+            self.assertTrue(steered["isGenerating"])
+
+            done = app.command("complete_generation", text="third reply")
+            self.assertFalse(done["isGenerating"])
+            self.assertEqual(done["queuedCount"], 0)
+            self.assertGreaterEqual(done["messageCount"], 3)
+
     def test_history_window_shortcut(self) -> None:
         with QuickAskHarness() as app:
             app.command("show_panel")
@@ -404,6 +430,53 @@ class QuickAskUITests(unittest.TestCase):
             self.assertFalse(after["panelVisible"])
             self.assertFalse(after["historyWindowVisible"])
             self.assertFalse(after["panelIsKeyWindow"])
+
+    def test_cmd_comma_opens_settings_window_and_keeps_it_on_screen(self) -> None:
+        with QuickAskHarness() as app:
+            shown = app.command("shortcut", shortcut="cmd_comma")
+            self.assertTrue(shown["settingsWindowVisible"])
+            self.assertGreaterEqual(shown["settingsFrame"]["height"], 320)
+            self.assertLessEqual(shown["settingsFrame"]["height"], shown["screenVisibleHeight"] + 1.0)
+
+    def test_model_visibility_defaults_to_latest_chatgpt_and_can_be_changed(self) -> None:
+        with QuickAskHarness() as app:
+            state = app.command("show_panel")
+            state = app.wait_for(lambda current: len(current["visibleModelIDs"]) > 0, timeout=8.0)
+            self.assertIn("codex::gpt-5.4", state["visibleModelIDs"])
+            self.assertNotIn("codex::gpt-5.4-mini", state["visibleModelIDs"])
+
+            app.command("set_model_visible", text="codex::gpt-5.4-mini|1")
+            enabled = app.wait_for(
+                lambda current: "codex::gpt-5.4-mini" in current["visibleModelIDs"],
+                timeout=8.0,
+            )
+            self.assertIn("codex::gpt-5.4-mini", enabled["visibleModelIDs"])
+
+            app.command("set_model_visible", text="codex::gpt-5.4|0")
+            disabled = app.wait_for(
+                lambda current: "codex::gpt-5.4" not in current["visibleModelIDs"],
+                timeout=8.0,
+            )
+            self.assertNotIn("codex::gpt-5.4", disabled["visibleModelIDs"])
+
+    def test_switching_models_preserves_history_and_updates_next_turn_selection(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.wait_for(lambda current: "codex::gpt-5.4" in current["visibleModelIDs"], timeout=8.0)
+
+            app.command("set_input", text="first prompt")
+            app.command("submit")
+            app.command("complete_generation", text="first reply")
+
+            switched = app.command("select_model", text="codex::gpt-5.4")
+            self.assertEqual(switched["selectedModel"], "ChatGPT 5.4")
+            self.assertEqual(switched["messageCount"], 2)
+
+            app.command("set_input", text="second prompt")
+            in_flight = app.command("submit")
+            self.assertTrue(in_flight["isGenerating"])
+            self.assertEqual(in_flight["selectedModel"], "ChatGPT 5.4")
+            self.assertEqual(in_flight["messageCount"], 4)
 
 
 if __name__ == "__main__":

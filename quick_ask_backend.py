@@ -131,6 +131,8 @@ def parse_args() -> argparse.Namespace:
 
     subparsers.add_parser("models", help="List available models for the panel.")
     subparsers.add_parser("providers", help="List provider availability and login status.")
+    storage_parser = subparsers.add_parser("storage", help="Inspect encrypted history storage readiness.")
+    storage_parser.add_argument("--ensure-key", action="store_true", help="Create the Keychain transcript key if missing.")
 
     history_parser = subparsers.add_parser("history", help="List encrypted Quick Ask sessions.")
     history_parser.add_argument("--limit", type=int, default=100, help="Maximum number of sessions to return.")
@@ -1070,12 +1072,54 @@ def handle_save(session_id: str, created_at: str, model_id: str) -> int:
     return 0
 
 
+def handle_storage(ensure_key: bool) -> int:
+    try:
+        if ensure_key:
+            shared.get_or_create_master_key()
+        else:
+            existing = shared.find_master_key()
+            if existing is None:
+                emit(
+                    {
+                        "type": "storage",
+                        "history_ready": False,
+                        "keychain_ready": False,
+                        "detail": "Transcript encryption key is not in Keychain yet.",
+                        "path": str(shared.default_save_dir()),
+                    }
+                )
+                return 0
+        emit(
+            {
+                "type": "storage",
+                "history_ready": True,
+                "keychain_ready": True,
+                "detail": f"Transcript encryption key is ready in Keychain under {shared.KEYCHAIN_SERVICE}.",
+                "path": str(shared.default_save_dir()),
+            }
+        )
+        return 0
+    except Exception as exc:
+        emit(
+            {
+                "type": "storage",
+                "history_ready": False,
+                "keychain_ready": False,
+                "detail": f"Could not prepare encrypted history: {exc}",
+                "path": str(shared.default_save_dir()),
+            }
+        )
+        return 1
+
+
 def main() -> int:
     args = parse_args()
     if args.command == "models":
         return handle_models()
     if args.command == "providers":
         return handle_providers()
+    if args.command == "storage":
+        return handle_storage(args.ensure_key)
     if args.command == "history":
         return handle_history(args.limit)
     if args.command == "load":

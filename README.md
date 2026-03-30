@@ -14,11 +14,13 @@ The app lives above your other windows, keeps the input bar pinned while the con
 - Queue prompts while a reply is still streaming
 - Steer to the next queued prompt with `Cmd+Enter`
 - Cancel queued prompts without interrupting the current reply
+- Steer or remove each queued prompt individually
 - Restore earlier chats from encrypted saved history
 - Show a small setup screen only when history is enabled but no archive folder has been chosen yet
 - Pick your own archive folder or disable history entirely
 - Switch between Claude via Claude CLI, ChatGPT via Codex CLI, Gemini via Gemini CLI, and installed Ollama models
 - Recheck Claude, Codex, Gemini, and local-model availability from `Settings…`
+- Hide or re-enable individual available models from `Settings…`
 
 ## Requirements
 
@@ -33,7 +35,7 @@ The app lives above your other windows, keeps the input bar pinned while the con
 Transcript saves are encrypted before they are written to disk.
 
 - On first setup, Quick Ask asks whether history should be enabled.
-- If history is enabled, Quick Ask requires you to pick the archive folder yourself.
+- If history is enabled, Quick Ask saves into a `Quick Ask/sessions` subfolder inside the folder you choose.
 - If history is disabled, Quick Ask does not save transcripts.
 - The encryption key is stored in macOS Keychain under the service name `local-chat-transcript-key`.
 - The app writes encrypted transcript files only. It does not write plaintext chat logs during normal use.
@@ -66,8 +68,15 @@ That script:
 5. Type a prompt and press `Enter`.
 6. Use the model menu to switch providers or open `Settings…`.
 7. Press `Cmd+Shift+\` to browse and restore prior chats when history is enabled.
+8. Press `Cmd+,` to open the real Quick Ask settings window.
 
 If at least one provider or local model is already available, Quick Ask does not block you on provider setup. Provider status in `Settings…` is informational and reusable, not an API-key onboarding flow.
+
+Model switching semantics:
+
+- changing the selected model does not interrupt the reply already in flight
+- the next submitted turn uses the newly selected model
+- the current conversation history carries forward until you start a fresh chat
 
 ## Repo Notes
 

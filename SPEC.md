@@ -175,21 +175,21 @@ The app name is `Quick Ask`.
 
 These are open issues that should be fixed, tested, and pushed.
 
-- [ ] Change the archive folder behavior/default so history saves to a subfolder with the same name as the app.
-- [ ] Make Settings visually clearer so buttons read as buttons and text reads as text.
-- [ ] Make Settings explain encrypted history clearly, including untrusted cloud storage safety and Keychain-based key storage.
-- [ ] Ensure the encryption key is ready before any encrypted history writes happen.
-- [ ] Disable the autofill/autocomplete dropdown that sometimes appears when the app is invoked.
-- [ ] Show only the latest instant ChatGPT model by default.
-- [ ] Add Settings controls to enable/disable available models/providers in the visible picker.
-- [ ] Keep manual refresh for providers/models and ensure unavailable models naturally disappear from the picker.
-- [ ] Fix `Cmd+,` so it opens the real settings window consistently.
-- [ ] Move queue actions to the per-item level.
-- [ ] Change queue cancel UI to an `x.circle`-style symbol.
-- [ ] Make hyperlinks clickable in the conversation view.
-- [ ] Make long-running/reasoning behavior clearer so users know whether an answer is still in progress.
-- [ ] Verify history restoration and follow-up behavior still make sense across provider/model switches.
-- [ ] Verify model switching semantics are explicit in the UI or documentation so users know the next turn uses the newly selected model with prior history.
+- [x] Change the archive folder behavior/default so history saves to a subfolder with the same name as the app.
+- [x] Make Settings visually clearer so buttons read as buttons and text reads as text.
+- [x] Make Settings explain encrypted history clearly, including untrusted cloud storage safety and Keychain-based key storage.
+- [x] Ensure the encryption key is ready before any encrypted history writes happen.
+- [x] Disable the autofill/autocomplete dropdown that sometimes appears when the app is invoked.
+- [x] Show only the latest instant ChatGPT model by default.
+- [x] Add Settings controls to enable/disable available models/providers in the visible picker.
+- [x] Keep manual refresh for providers/models and ensure unavailable models naturally disappear from the picker.
+- [x] Fix `Cmd+,` so it opens the real settings window consistently.
+- [x] Move queue actions to the per-item level.
+- [x] Change queue cancel UI to an `x.circle`-style symbol.
+- [x] Make hyperlinks clickable in the conversation view.
+- [x] Make long-running/reasoning behavior clearer so users know whether an answer is still in progress.
+- [x] Verify history restoration and follow-up behavior still make sense across provider/model switches.
+- [x] Verify model switching semantics are explicit in the UI or documentation so users know the next turn uses the newly selected model with prior history.
 
 ## Verification Requirements
 
@@ -200,3 +200,9 @@ Before considering the open items complete:
 - UI suite passes
 - changed behaviors are manually spot-checked when practical
 - changes are committed and pushed to `main`
+
+Latest verification snapshot:
+
+- `./build-quick-ask`
+- `python3 tests/test_quick_ask_ui.py -v`
+- 18 passing UI tests

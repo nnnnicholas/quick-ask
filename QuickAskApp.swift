@@ -212,15 +212,21 @@ final class QuickAskAppSettings: ObservableObject {
     @Published private(set) var customArchiveDirectoryPath: String
     @Published private(set) var setupCompleted: Bool
     @Published private(set) var providerStatuses: [QuickAskProviderStatus] = []
+    @Published private(set) var availableModels: [ModelOption] = []
     @Published private(set) var isRefreshingProviders = false
     @Published private(set) var providerStatusMessage = ""
+    @Published private(set) var keychainReady = false
+    @Published private(set) var storageDetail = ""
 
     private let defaults: UserDefaults
     private let archiveDirectoryKey = "QuickAskCustomArchiveDirectory"
     private let historyEnabledKey = "QuickAskHistoryEnabled"
     private let setupCompletedKey = "QuickAskSetupCompleted"
+    private let hiddenModelIDsKey = "QuickAskHiddenModelIDs"
     private let archiveAppFolderName = "Quick Ask"
     private let archiveSessionsFolderName = "sessions"
+    private let defaultHiddenModelIDs: Set<String> = ["codex::gpt-5.4-mini"]
+    private var hiddenModelIDs: Set<String>
 
     init(defaults: UserDefaults = quickAskUserDefaults()) {
         self.defaults = defaults
@@ -231,6 +237,11 @@ final class QuickAskAppSettings: ObservableObject {
         }
         self.customArchiveDirectoryPath = defaults.string(forKey: archiveDirectoryKey) ?? ""
         self.setupCompleted = defaults.bool(forKey: setupCompletedKey)
+        if let stored = defaults.array(forKey: hiddenModelIDsKey) as? [String] {
+            self.hiddenModelIDs = Set(stored)
+        } else {
+            self.hiddenModelIDs = defaultHiddenModelIDs
+        }
     }
 
     var customArchiveDirectory: URL? {
@@ -312,6 +323,31 @@ final class QuickAskAppSettings: ObservableObject {
         defaults.removeObject(forKey: archiveDirectoryKey)
     }
 
+    func setAvailableModels(_ models: [ModelOption]) {
+        if availableModels != models {
+            availableModels = models
+        }
+    }
+
+    func isModelVisible(_ modelID: String) -> Bool {
+        !hiddenModelIDs.contains(modelID)
+    }
+
+    func setModelVisible(_ modelID: String, visible: Bool) {
+        if visible {
+            hiddenModelIDs.remove(modelID)
+        } else {
+            hiddenModelIDs.insert(modelID)
+        }
+        defaults.set(Array(hiddenModelIDs).sorted(), forKey: hiddenModelIDsKey)
+        objectWillChange.send()
+    }
+
+    func visibleModels(from models: [ModelOption]) -> [ModelOption] {
+        setAvailableModels(models)
+        return models.filter { isModelVisible($0.id) }
+    }
+
     func archiveFolderSelectionHint() -> String {
         let defaultParent = defaultArchiveDirectory.deletingLastPathComponent().deletingLastPathComponent()
         return "Quick Ask will save into a \(archiveAppFolderName) subfolder inside the folder you choose. Default: \(defaultParent.path)"
@@ -381,6 +417,41 @@ final class QuickAskAppSettings: ObservableObject {
             }
         }
     }
+
+    func refreshStorageStatus(backendPath: String, ensureKey: Bool) {
+        let processEnvironment = processEnvironment()
+        Task.detached(priority: .userInitiated) {
+            let process = Process()
+            process.executableURL = URL(fileURLWithPath: "/usr/bin/env")
+            process.arguments = ["python3", backendPath, "storage"] + (ensureKey ? ["--ensure-key"] : [])
+            process.environment = processEnvironment
+
+            let stdout = Pipe()
+            let stderr = Pipe()
+            process.standardOutput = stdout
+            process.standardError = stderr
+
+            do {
+                try process.run()
+                process.waitUntilExit()
+                let stdoutData = stdout.fileHandleForReading.readDataToEndOfFile()
+                if let payload = try? JSONSerialization.jsonObject(with: stdoutData) as? [String: Any],
+                   let ready = payload["keychain_ready"] as? Bool {
+                    let detail = payload["detail"] as? String ?? ""
+                    await MainActor.run {
+                        self.keychainReady = ready
+                        self.storageDetail = detail
+                    }
+                    return
+                }
+            } catch {}
+
+            await MainActor.run {
+                self.keychainReady = false
+                self.storageDetail = "Could not verify encrypted history readiness."
+            }
+        }
+    }
 }
 
 private struct CodableRect: Codable {
@@ -403,18 +474,22 @@ private struct QuickAskUITestState: Codable {
     let settingsWindowVisible: Bool
     let panelIsKeyWindow: Bool
     let panelFrame: CodableRect
+    let settingsFrame: CodableRect
     let inputBarFrame: CodableRect
     let inputBarBottomInset: Double
     let historyAreaHeight: Double
     let messageCount: Int
     let queuedCount: Int
+    let queuedPromptContents: [String]
     let isGenerating: Bool
     let focusRequestCount: Int
     let frontmostAppName: String
     let selectedModel: String
+    let visibleModelIDs: [String]
     let inputText: String
     let setupRequired: Bool
     let historyEnabled: Bool
+    let screenVisibleHeight: Double
     let handledCommandID: Int
 }
 
@@ -448,6 +523,8 @@ final class QuickAskViewModel: ObservableObject {
 
     private let backendPath: String
     private let processEnvironmentProvider: () -> [String: String]
+    private let visibleModelsProvider: ([ModelOption]) -> [ModelOption]
+    private let availableModelsObserver: ([ModelOption]) -> Void
     private let defaults: UserDefaults
     private let lastModelKey = "QuickAskSelectedModelID"
     private let idleTimeout: TimeInterval = 45
@@ -463,15 +540,20 @@ final class QuickAskViewModel: ObservableObject {
     private let saveQueue = DispatchQueue(label: "app.quickask.save", qos: .utility)
     private var pendingResetAfterTermination = false
     private var pendingResetPreserveInput = false
-    private var pendingSteerAfterTermination = false
+    private var pendingSteerPromptID: UUID?
+    private var currentTurnStreamedAny = false
 
     init(
         backendPath: String,
         processEnvironmentProvider: @escaping () -> [String: String],
+        visibleModelsProvider: @escaping ([ModelOption]) -> [ModelOption] = { $0 },
+        availableModelsObserver: @escaping ([ModelOption]) -> Void = { _ in },
         defaults: UserDefaults = quickAskUserDefaults()
     ) {
         self.backendPath = backendPath
         self.processEnvironmentProvider = processEnvironmentProvider
+        self.visibleModelsProvider = visibleModelsProvider
+        self.availableModelsObserver = availableModelsObserver
         self.defaults = defaults
         if let storedModel = defaults.string(forKey: lastModelKey), !storedModel.isEmpty {
             selectedModelID = storedModel
@@ -522,6 +604,11 @@ final class QuickAskViewModel: ObservableObject {
     }
 
     func loadModels() {
+        if uiTestMode {
+            applyLoadedModels(uiTestModelOptions())
+            return
+        }
+
         let backendPath = self.backendPath
         let processEnvironment = self.processEnvironmentProvider()
         Task.detached(priority: .userInitiated) {
@@ -548,24 +635,50 @@ final class QuickAskViewModel: ObservableObject {
             guard let payload = try? JSONDecoder().decode(ModelsEnvelope.self, from: stdoutData),
                   payload.type == "models" else {
                 await MainActor.run {
+                    self.availableModelsObserver([])
+                    self.models = []
                     self.statusText = "Could not load models."
                 }
                 return
             }
 
             await MainActor.run {
-                self.models = payload.models
-                if let selected = self.models.first(where: { $0.id == self.selectedModelID }) {
-                    self.selectedModelID = selected.id
-                } else if let defaultModel = self.models.first(where: { $0.default == true }) ?? self.models.first {
-                    self.selectedModelID = defaultModel.id
-                }
-                self.defaults.set(self.selectedModelID, forKey: self.lastModelKey)
-                if self.statusText == "Could not load models." {
-                    self.statusText = ""
-                }
+                self.applyLoadedModels(payload.models)
             }
         }
+    }
+
+    private func applyLoadedModels(_ loadedModels: [ModelOption]) {
+        availableModelsObserver(loadedModels)
+        let visibleModels = visibleModelsProvider(loadedModels)
+        models = visibleModels
+
+        let preferredModelID = defaults.string(forKey: lastModelKey)
+        if let preferredModelID,
+           visibleModels.contains(where: { $0.id == preferredModelID }) {
+            selectedModelID = preferredModelID
+        } else if let selected = visibleModels.first(where: { $0.id == selectedModelID }) {
+            selectedModelID = selected.id
+        } else if let defaultModel = visibleModels.first(where: { $0.default == true }) ?? visibleModels.first {
+            selectedModelID = defaultModel.id
+        }
+        if visibleModels.isEmpty {
+            statusText = "No enabled models are available."
+        } else if statusText == "Could not load models." || statusText == "No enabled models are available." {
+            statusText = ""
+        }
+    }
+
+    private func uiTestModelOptions() -> [ModelOption] {
+        [
+            ModelOption(id: "claude::claude-opus-4-6", provider: "claude", model: "claude-opus-4-6", label: "Claude Opus 4.6", short_label: "Opus 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: true),
+            ModelOption(id: "claude::claude-sonnet-4-6", provider: "claude", model: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", short_label: "Sonnet 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: false),
+            ModelOption(id: "codex::gpt-5.4", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4", short_label: "ChatGPT 5.4", hint: "Codex CLI login", endpoint: "codex://login", default: false),
+            ModelOption(id: "codex::gpt-5.4-mini", provider: "codex", model: "gpt-5.4-mini", label: "ChatGPT 5.4 Mini", short_label: "ChatGPT 5.4 Mini", hint: "Codex CLI login", endpoint: "codex://login", default: false),
+            ModelOption(id: "gemini::gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash", short_label: "Gemini 3 Flash", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
+            ModelOption(id: "gemini::gemini-2.5-flash-lite", provider: "gemini", model: "gemini-2.5-flash-lite", label: "Gemini Flash Lite", short_label: "Gemini Flash Lite", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
+            ModelOption(id: "ollama::qwen2.5:14b", provider: "ollama", model: "qwen2.5:14b", label: "Qwen 2.5 14B", short_label: "Qwen 2.5 14B", hint: "Local model", endpoint: "ollama://local", default: false),
+        ]
     }
 
     func selectModel(_ modelID: String) {
@@ -662,16 +775,17 @@ final class QuickAskViewModel: ObservableObject {
     func steerCurrentInput() {
         let trimmed = inputText.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else {
-            steerQueuedPrompt()
+            steerQueuedPrompt(id: queuedPrompts.first?.id)
             return
         }
 
         touch()
         inputText = ""
         if isGenerating {
-            queuedPrompts.insert(QueuedPrompt(content: trimmed), at: 0)
+            let queuedPrompt = QueuedPrompt(content: trimmed)
+            queuedPrompts.insert(queuedPrompt, at: 0)
             layoutDelegate?.quickAskNeedsLayout()
-            pendingSteerAfterTermination = true
+            pendingSteerPromptID = queuedPrompt.id
             cancelActiveGeneration()
             return
         }
@@ -679,20 +793,33 @@ final class QuickAskViewModel: ObservableObject {
         startGeneration(for: trimmed)
     }
 
-    func steerQueuedPrompt() {
+    func steerQueuedPrompt(id: UUID?) {
         touch()
-        guard !queuedPrompts.isEmpty else { return }
+        guard let id else { return }
+        guard let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+        let prompt = queuedPrompts.remove(at: index)
+        queuedPrompts.insert(prompt, at: 0)
+        layoutDelegate?.quickAskNeedsLayout()
         if isGenerating {
-            pendingSteerAfterTermination = true
+            pendingSteerPromptID = id
             cancelActiveGeneration()
             return
         }
-        sendNextQueuedPrompt()
+        sendQueuedPrompt(id: id)
+    }
+
+    func cancelQueuedPrompt(id: UUID) {
+        touch()
+        queuedPrompts.removeAll { $0.id == id }
+        if pendingSteerPromptID == id {
+            pendingSteerPromptID = nil
+        }
+        layoutDelegate?.quickAskNeedsLayout()
     }
 
     func clearQueuedPrompts() {
         touch()
-        pendingSteerAfterTermination = false
+        pendingSteerPromptID = nil
         queuedPrompts = []
         layoutDelegate?.quickAskNeedsLayout()
     }
@@ -703,6 +830,7 @@ final class QuickAskViewModel: ObservableObject {
 
     private func startGeneration(for prompt: String) {
         statusText = ""
+        currentTurnStreamedAny = false
         messages.append(ChatMessage(role: .user, content: prompt))
         let assistantID = UUID()
         activeAssistantMessageID = assistantID
@@ -801,6 +929,13 @@ final class QuickAskViewModel: ObservableObject {
         requestFocus()
     }
 
+    private func sendQueuedPrompt(id: UUID) {
+        guard !isGenerating, let index = queuedPrompts.firstIndex(where: { $0.id == id }) else { return }
+        let prompt = queuedPrompts.remove(at: index)
+        startGeneration(for: prompt.content)
+        requestFocus()
+    }
+
     func completeTestGeneration(with text: String) {
         guard uiTestMode, isGenerating else { return }
         if !text.isEmpty {
@@ -852,6 +987,7 @@ final class QuickAskViewModel: ObservableObject {
 
     private func appendAssistantChunk(_ text: String) {
         guard !text.isEmpty else { return }
+        currentTurnStreamedAny = true
         if let assistantID = activeAssistantMessageID,
            let index = messages.firstIndex(where: { $0.id == assistantID }) {
             messages[index].content += text
@@ -864,8 +1000,7 @@ final class QuickAskViewModel: ObservableObject {
     }
 
     private func finishGeneration(exitCode: Int32) {
-        let interruptedForSteer = pendingSteerAfterTermination
-        pendingSteerAfterTermination = false
+        let interruptedForSteer = pendingSteerPromptID != nil
         isGenerating = false
         activeProcess = nil
 
@@ -893,11 +1028,29 @@ final class QuickAskViewModel: ObservableObject {
         activeAssistantMessageID = nil
         saveTranscript()
         layoutDelegate?.quickAskNeedsLayout()
+        if let pendingSteerPromptID {
+            self.pendingSteerPromptID = nil
+            sendQueuedPrompt(id: pendingSteerPromptID)
+            return
+        }
         if !queuedPrompts.isEmpty {
             sendNextQueuedPrompt()
             return
         }
         requestFocus()
+    }
+
+    var progressText: String {
+        guard isGenerating else { return "" }
+        let modelName = models.first(where: { $0.id == selectedModelID })?.shortLabel ?? "Selected model"
+        let phase = currentTurnStreamedAny ? "is still replying" : "is thinking"
+        if pendingSteerPromptID != nil {
+            return "\(modelName) \(phase). A queued prompt will steer in next."
+        }
+        if !queuedPrompts.isEmpty {
+            return "\(modelName) \(phase). \(queuedPrompts.count) queued."
+        }
+        return "\(modelName) \(phase)…"
     }
 
     private func friendlyErrorMessage(from rawMessage: String?) -> String {
@@ -1320,6 +1473,13 @@ struct QuickAskSettingsView: View {
                         .font(.system(size: 11, weight: .regular))
                         .foregroundStyle(QuickAskTheme.mutedText)
                         .fixedSize(horizontal: false, vertical: true)
+
+                    if settings.historyEnabled {
+                        Text(settings.storageDetail.isEmpty ? "Preparing Keychain-backed encryption…" : settings.storageDetail)
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(settings.keychainReady ? QuickAskTheme.mutedText : QuickAskTheme.strongText.opacity(0.78))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
 
                 if settings.historyEnabled {
@@ -1415,6 +1575,50 @@ struct QuickAskSettingsView: View {
                         }
                     }
                 }
+
+                Rectangle()
+                    .fill(QuickAskTheme.dividerColor)
+                    .frame(height: 1)
+
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Visible Models")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(QuickAskTheme.strongText)
+                    Text("Only enabled and currently available models appear in the picker. Refresh above to rescan Claude, Codex/ChatGPT, Gemini, and Ollama.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(QuickAskTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    Text("Switching models only changes the next turn. A reply already in flight keeps using its current model, and the existing conversation history carries forward.")
+                        .font(.system(size: 11))
+                        .foregroundStyle(QuickAskTheme.mutedText)
+                        .fixedSize(horizontal: false, vertical: true)
+
+                    if settings.availableModels.isEmpty {
+                        Text("No models are currently available.")
+                            .font(.system(size: 11, weight: .regular))
+                            .foregroundStyle(QuickAskTheme.mutedText)
+                    } else {
+                        ForEach(settings.availableModels) { model in
+                            Toggle(
+                                isOn: Binding(
+                                    get: { settings.isModelVisible(model.id) },
+                                    set: { settings.setModelVisible(model.id, visible: $0) }
+                                )
+                            ) {
+                                VStack(alignment: .leading, spacing: 1) {
+                                    Text(model.shortLabel)
+                                        .font(.system(size: 12, weight: .medium))
+                                        .foregroundStyle(QuickAskTheme.strongText)
+                                    Text(model.provider == "ollama" ? "Local model" : "\(model.provider.capitalized) via CLI login")
+                                        .font(.system(size: 10, weight: .regular))
+                                        .foregroundStyle(QuickAskTheme.mutedText)
+                                }
+                            }
+                            .toggleStyle(.checkbox)
+                        }
+                    }
+                }
             }
                 .padding(14)
                 .frame(maxWidth: .infinity, alignment: .topLeading)
@@ -1429,6 +1633,9 @@ struct QuickAskSettingsView: View {
         .onChange(of: settings.customArchiveDirectoryPath) { _, _ in onLayoutChange() }
         .onChange(of: settings.providerStatuses) { _, _ in onLayoutChange() }
         .onChange(of: settings.providerStatusMessage) { _, _ in onLayoutChange() }
+        .onChange(of: settings.availableModels) { _, _ in onLayoutChange() }
+        .onChange(of: settings.keychainReady) { _, _ in onLayoutChange() }
+        .onChange(of: settings.storageDetail) { _, _ in onLayoutChange() }
     }
 }
 
@@ -1628,7 +1835,6 @@ private struct MessageContentView: View {
                 case .text(let value):
                     Text(markdownAttributedString(from: value))
                         .font(.system(size: 13, weight: .regular, design: .default))
-                        .textSelection(.enabled)
                         .frame(maxWidth: .infinity, alignment: .leading)
                 case .table(let header, let rows):
                     MessageMarkdownTableView(header: header, rows: rows)
@@ -1655,7 +1861,6 @@ private struct MessageMarkdownTableView: View {
                     ForEach(0..<columnCount, id: \.self) { index in
                         Text(markdownAttributedString(from: cellText(header, index: index)))
                             .font(.system(size: 12, weight: .semibold, design: .default))
-                            .textSelection(.enabled)
                             .frame(maxWidth: .infinity, alignment: .leading)
                             .padding(.horizontal, 8)
                             .padding(.vertical, 6)
@@ -1672,7 +1877,6 @@ private struct MessageMarkdownTableView: View {
                         ForEach(0..<columnCount, id: \.self) { index in
                             Text(markdownAttributedString(from: cellText(row, index: index)))
                                 .font(.system(size: 12, weight: .regular, design: .default))
-                                .textSelection(.enabled)
                                 .frame(maxWidth: .infinity, alignment: .leading)
                                 .padding(.horizontal, 8)
                                 .padding(.vertical, 6)
@@ -1698,11 +1902,35 @@ private struct MessageMarkdownTableView: View {
 }
 
 private func markdownAttributedString(from text: String) -> AttributedString {
+    let normalizedText = normalizeMarkdownInput(text)
     let options = AttributedString.MarkdownParsingOptions(interpretedSyntax: .inlineOnlyPreservingWhitespace)
-    if let attributed = try? AttributedString(markdown: text, options: options) {
-        return attributed
+    var attributed = (try? AttributedString(markdown: normalizedText, options: options)) ?? AttributedString(normalizedText)
+    applyDetectedLinks(to: &attributed, source: normalizedText)
+    return attributed
+}
+
+private func normalizeMarkdownInput(_ text: String) -> String {
+    guard let regex = try? NSRegularExpression(pattern: #"\[([^\]]+)\]\s+\((https?://[^\s)]+)\)"#) else {
+        return text
     }
-    return AttributedString(text)
+    let range = NSRange(text.startIndex..<text.endIndex, in: text)
+    return regex.stringByReplacingMatches(in: text, options: [], range: range, withTemplate: "[$1]($2)")
+}
+
+private func applyDetectedLinks(to attributed: inout AttributedString, source: String) {
+    guard let detector = try? NSDataDetector(types: NSTextCheckingResult.CheckingType.link.rawValue) else {
+        return
+    }
+    let range = NSRange(source.startIndex..<source.endIndex, in: source)
+    for match in detector.matches(in: source, options: [], range: range) {
+        guard let url = match.url,
+              let textRange = Range(match.range, in: source),
+              let lower = AttributedString.Index(textRange.lowerBound, within: attributed),
+              let upper = AttributedString.Index(textRange.upperBound, within: attributed) else {
+            continue
+        }
+        attributed[lower..<upper].link = url
+    }
 }
 
 private func parseMarkdownBlocks(_ text: String) -> [MessageMarkdownBlock] {
@@ -1793,6 +2021,8 @@ private func parseMarkdownTableRow(_ line: String) -> [String] {
 
 struct QueuedPromptRow: View {
     let prompt: QueuedPrompt
+    let onSteer: () -> Void
+    let onCancel: () -> Void
 
     var body: some View {
         HStack(alignment: .top, spacing: 8) {
@@ -1802,9 +2032,24 @@ struct QueuedPromptRow: View {
                 .lineLimit(2)
                 .frame(maxWidth: .infinity, alignment: .leading)
 
-            Text("queued")
-                .font(.system(size: 10, weight: .semibold))
-                .foregroundStyle(QuickAskTheme.mutedText)
+            Button(action: onSteer) {
+                Text("Steer")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(QuickAskTheme.strongText)
+                    .padding(.horizontal, 7)
+                    .padding(.vertical, 4)
+                    .background(Rectangle().fill(Color.white.opacity(0.16)))
+                    .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
+            }
+            .buttonStyle(.plain)
+
+            Button(action: onCancel) {
+                Image(systemName: "xmark.circle")
+                    .font(.system(size: 12, weight: .semibold))
+                    .foregroundStyle(QuickAskTheme.strongText.opacity(0.82))
+                    .frame(width: 18, height: 18)
+            }
+            .buttonStyle(.plain)
         }
         .padding(.horizontal, 10)
         .padding(.vertical, 8)
@@ -1922,7 +2167,7 @@ struct SuggestionFreeInputField: NSViewRepresentable {
     }
 
     func makeNSView(context: Context) -> NSTextField {
-        let field = NSTextField(string: text)
+        let field = SuggestionFreeTextField(string: text)
         field.delegate = context.coordinator
         field.placeholderAttributedString = NSAttributedString(
             string: placeholder,
@@ -1951,6 +2196,10 @@ struct SuggestionFreeInputField: NSViewRepresentable {
         }
         context.coordinator.requestFocus(for: field, token: focusToken)
     }
+}
+
+final class SuggestionFreeTextField: NSTextField {
+    override func complete(_ sender: Any?) {}
 }
 
 struct QuickAskView: View {
@@ -2008,16 +2257,18 @@ struct QuickAskView: View {
                             .font(.system(size: 11, weight: .semibold))
                             .foregroundStyle(QuickAskTheme.mutedText)
                         Spacer()
-                        actionButton("Cancel") {
-                            viewModel.clearQueuedPrompts()
-                        }
-                        actionButton("Steer") {
-                            viewModel.steerQueuedPrompt()
-                        }
                     }
 
                     ForEach(viewModel.queuedPrompts) { prompt in
-                        QueuedPromptRow(prompt: prompt)
+                        QueuedPromptRow(
+                            prompt: prompt,
+                            onSteer: {
+                                viewModel.steerQueuedPrompt(id: prompt.id)
+                            },
+                            onCancel: {
+                                viewModel.cancelQueuedPrompt(id: prompt.id)
+                            }
+                        )
                     }
                 }
                 .padding(10)
@@ -2100,11 +2351,29 @@ struct QuickAskView: View {
                     .padding(.vertical, 7)
                     .background(QuickAskTheme.inputBackground.opacity(0.96))
                     .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
+                } else if !viewModel.progressText.isEmpty {
+                    HStack(spacing: 8) {
+                        ProgressView()
+                            .controlSize(.small)
+                            .tint(QuickAskTheme.strongText)
+                        Text(viewModel.progressText)
+                            .font(.system(size: 11, weight: .medium))
+                            .foregroundStyle(QuickAskTheme.mutedText)
+                        Spacer()
+                    }
+                    .padding(.horizontal, 10)
+                    .padding(.vertical, 7)
+                    .background(QuickAskTheme.inputBackground.opacity(0.96))
+                    .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
                 }
             }
         }
         .frame(width: 560)
         .background(QuickAskTheme.frameBackground)
+        .environment(\.openURL, OpenURLAction { url in
+            NSWorkspace.shared.open(url)
+            return .handled
+        })
         .onPreferenceChange(InputBarFrameKey.self) { value in
             viewModel.setInputBarFrame(value)
         }
@@ -2238,6 +2507,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             backendPath: backendPath,
             processEnvironmentProvider: { [weak self] in
                 self?.settings.processEnvironment() ?? ProcessInfo.processInfo.environment
+            },
+            visibleModelsProvider: { [weak self] models in
+                self?.settings.visibleModels(from: models) ?? models
+            },
+            availableModelsObserver: { [weak self] models in
+                self?.settings.setAvailableModels(models)
             },
             defaults: defaults
         )
@@ -2495,6 +2770,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         if panel.runModal() == .OK, let url = panel.url {
             settings.setCustomArchiveDirectory(url)
             viewModel.persistCurrentTranscript()
+            refreshSettingsStatus()
             historyViewModel.reload()
         }
     }
@@ -2502,11 +2778,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
     private func clearArchiveDirectory() {
         settings.clearCustomArchiveDirectory()
         viewModel.persistCurrentTranscript()
+        refreshSettingsStatus()
         historyViewModel.reload()
     }
 
     private func refreshSettingsStatus() {
         settings.refreshProviderStatuses(backendPath: backendPath)
+        settings.refreshStorageStatus(backendPath: backendPath, ensureKey: settings.historyEnabled)
         viewModel.loadModels()
         historyViewModel.reload()
     }
@@ -2834,6 +3112,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         } else {
             selectedModel = ""
         }
+        let visibleModelIDs = viewModel?.models.map(\.id) ?? []
+        let screenVisibleHeight = panel?.screen?.visibleFrame.height
+            ?? settingsWindow?.screen?.visibleFrame.height
+            ?? NSScreen.main?.visibleFrame.height
+            ?? 0
 
         return QuickAskUITestState(
             panelVisible: panel?.isVisible ?? false,
@@ -2841,6 +3124,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             settingsWindowVisible: settingsWindow?.isVisible ?? false,
             panelIsKeyWindow: panel?.isKeyWindow ?? false,
             panelFrame: CodableRect(panel?.frame ?? .zero),
+            settingsFrame: CodableRect(settingsWindow?.frame ?? .zero),
             inputBarFrame: CodableRect(viewModel?.inputBarFrame ?? .zero),
             inputBarBottomInset: max(
                 0,
@@ -2849,13 +3133,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             historyAreaHeight: Double(viewModel?.historyAreaHeight ?? 0),
             messageCount: viewModel?.messages.count ?? 0,
             queuedCount: viewModel?.queuedPrompts.count ?? 0,
+            queuedPromptContents: viewModel?.queuedPrompts.map(\.content) ?? [],
             isGenerating: viewModel?.isGenerating ?? false,
             focusRequestCount: viewModel?.focusRequestCount ?? 0,
             frontmostAppName: frontmostAppName,
             selectedModel: selectedModel,
+            visibleModelIDs: visibleModelIDs,
             inputText: viewModel?.inputText ?? "",
             setupRequired: settings?.requiresInitialSetup ?? false,
             historyEnabled: settings?.historyEnabled ?? true,
+            screenVisibleHeight: Double(screenVisibleHeight),
             handledCommandID: handledCommandID
         )
     }
@@ -2894,10 +3181,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 settings.setCustomArchiveDirectory(URL(fileURLWithPath: text))
                 historyViewModel.reload()
             }
+        case "set_model_visible":
+            if let text = command.text,
+               let separator = text.lastIndex(of: "|") {
+                let modelID = String(text[..<separator])
+                let visible = String(text[text.index(after: separator)...]) != "0"
+                settings.setModelVisible(modelID, visible: visible)
+                viewModel.loadModels()
+            }
+        case "select_model":
+            if let text = command.text, !text.isEmpty {
+                viewModel.selectModel(text)
+            }
         case "clear_archive_dir":
             clearArchiveDirectory()
         case "clear_queue":
             viewModel.clearQueuedPrompts()
+        case "steer_queue_item":
+            if let text = command.text,
+               let prompt = viewModel.queuedPrompts.first(where: { $0.content == text }) {
+                viewModel.steerQueuedPrompt(id: prompt.id)
+            }
+        case "cancel_queue_item":
+            if let text = command.text,
+               let prompt = viewModel.queuedPrompts.first(where: { $0.content == text }) {
+                viewModel.cancelQueuedPrompt(id: prompt.id)
+            }
+        case "refresh_models":
+            viewModel.loadModels()
         case "request_focus":
             viewModel.requestFocus()
         case "shortcut":
@@ -2906,6 +3217,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 startNewChat()
             case "cmd_enter":
                 viewModel.steerCurrentInput()
+            case "cmd_comma":
+                showSettingsWindow()
             case "cmd_shift_backslash":
                 toggleHistoryWindow()
             case "cmd_backslash":
@@ -2922,13 +3235,62 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 
 final class MovableHostingView<Content: View>: NSHostingView<Content> {}
 
+private struct SettingsRedirectView: View {
+    let onRedirect: () -> Void
+
+    var body: some View {
+        SettingsWindowBridge(onRedirect: onRedirect)
+            .frame(width: 1, height: 1)
+    }
+}
+
+private struct SettingsWindowBridge: NSViewRepresentable {
+    let onRedirect: () -> Void
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(onRedirect: onRedirect)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        let view = NSView(frame: .zero)
+        DispatchQueue.main.async {
+            context.coordinator.redirectIfNeeded(from: view.window)
+        }
+        return view
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.redirectIfNeeded(from: nsView.window)
+        }
+    }
+
+    final class Coordinator {
+        private let onRedirect: () -> Void
+        private var redirected = false
+
+        init(onRedirect: @escaping () -> Void) {
+            self.onRedirect = onRedirect
+        }
+
+        func redirectIfNeeded(from window: NSWindow?) {
+            guard !redirected, let window else { return }
+            redirected = true
+            window.orderOut(nil)
+            onRedirect()
+        }
+    }
+}
+
 @main
 struct QuickAskApp: App {
     @NSApplicationDelegateAdaptor(AppDelegate.self) var appDelegate
 
     var body: some Scene {
         Settings {
-            EmptyView()
+            SettingsRedirectView {
+                appDelegate.showSettingsFromAppMenu()
+            }
         }
         .commands {
             CommandGroup(replacing: .appSettings) {
