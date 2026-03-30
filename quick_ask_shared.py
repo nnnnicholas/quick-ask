@@ -322,20 +322,74 @@ def hkdf_sha256(ikm: bytes, salt: bytes, info: bytes, length: int) -> bytes:
     return output[:length]
 
 
+def _parse_security_keychain_output(text: str) -> list[pathlib.Path]:
+    paths: list[pathlib.Path] = []
+    for raw_line in text.splitlines():
+        line = raw_line.strip().strip('"').strip()
+        if not line.startswith("/"):
+            continue
+        candidate = pathlib.Path(line).expanduser()
+        if candidate not in paths:
+            paths.append(candidate)
+    return paths
+
+
+def user_keychain_candidates() -> list[pathlib.Path]:
+    candidates: list[pathlib.Path] = []
+
+    def add(path: pathlib.Path) -> None:
+        if path.exists() and path not in candidates:
+            candidates.append(path)
+
+    home = pathlib.Path.home()
+    add(home / "Library/Keychains/login.keychain-db")
+    add(home / "Library/Keychains/login.keychain")
+
+    for command in (
+        ["security", "default-keychain", "-d", "user"],
+        ["security", "list-keychains", "-d", "user"],
+    ):
+        result = subprocess.run(command, capture_output=True, text=True)
+        if result.returncode != 0:
+            continue
+        for path in _parse_security_keychain_output(result.stdout):
+            add(path)
+
+    return candidates
+
+
 def find_master_key() -> bytes | None:
     account = getpass.getuser()
-    find = subprocess.run(
-        ["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"],
-        capture_output=True,
-        text=True,
-    )
-    if find.returncode != 0:
-        return None
+    keychains = user_keychain_candidates()
 
-    value = find.stdout.strip()
-    if not value:
-        raise RuntimeError("Found empty encryption key in Keychain.")
-    return b64d(value)
+    commands: list[list[str]] = []
+    if keychains:
+        for keychain in keychains:
+            commands.append(
+                [
+                    "security",
+                    "find-generic-password",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-a",
+                    account,
+                    "-w",
+                    str(keychain),
+                ]
+            )
+    else:
+        commands.append(["security", "find-generic-password", "-s", KEYCHAIN_SERVICE, "-a", account, "-w"])
+
+    for command in commands:
+        find = subprocess.run(command, capture_output=True, text=True)
+        if find.returncode != 0:
+            continue
+        value = find.stdout.strip()
+        if not value:
+            raise RuntimeError("Found empty encryption key in Keychain.")
+        return b64d(value)
+
+    return None
 
 
 def store_master_key(master_key: bytes) -> None:
@@ -344,26 +398,55 @@ def store_master_key(master_key: bytes) -> None:
 
     account = getpass.getuser()
     key_b64 = b64e(master_key)
-    add = subprocess.run(
-        [
-            "security",
-            "add-generic-password",
-            "-U",
-            "-s",
-            KEYCHAIN_SERVICE,
-            "-l",
-            KEYCHAIN_LABEL,
-            "-a",
-            account,
-            "-w",
-            key_b64,
-        ],
-        capture_output=True,
-        text=True,
-    )
-    if add.returncode != 0:
+    keychains = user_keychain_candidates()
+
+    commands: list[list[str]] = []
+    if keychains:
+        for keychain in keychains:
+            commands.append(
+                [
+                    "security",
+                    "add-generic-password",
+                    "-U",
+                    "-s",
+                    KEYCHAIN_SERVICE,
+                    "-l",
+                    KEYCHAIN_LABEL,
+                    "-a",
+                    account,
+                    "-w",
+                    key_b64,
+                    str(keychain),
+                ]
+            )
+    else:
+        commands.append(
+            [
+                "security",
+                "add-generic-password",
+                "-U",
+                "-s",
+                KEYCHAIN_SERVICE,
+                "-l",
+                KEYCHAIN_LABEL,
+                "-a",
+                account,
+                "-w",
+                key_b64,
+            ]
+        )
+
+    errors: list[str] = []
+    for command in commands:
+        add = subprocess.run(command, capture_output=True, text=True)
+        if add.returncode == 0:
+            return
         stderr = add.stderr.strip()
-        raise RuntimeError(f"Could not store encryption key in Keychain: {stderr or add.returncode}")
+        if stderr:
+            errors.append(stderr)
+
+    detail = errors[-1] if errors else "No usable keychain was available."
+    raise RuntimeError(f"Could not store encryption key in Keychain: {detail}")
 
 
 def get_or_create_master_key() -> bytes:
