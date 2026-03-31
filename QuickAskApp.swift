@@ -2498,6 +2498,7 @@ struct QuickAskView: View {
     @ObservedObject var viewModel: QuickAskViewModel
     let onOpenHistory: () -> Void
     let onOpenSettings: () -> Void
+    private let chatBottomAnchorID = "quick-ask-chat-bottom-anchor"
 
     private func actionButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
@@ -2520,6 +2521,9 @@ struct QuickAskView: View {
                                 MessageBubble(message: message)
                                     .id(message.id)
                             }
+                            Color.clear
+                                .frame(height: 1)
+                                .id(chatBottomAnchorID)
                         }
                         .padding(10)
                         .background(
@@ -2538,6 +2542,9 @@ struct QuickAskView: View {
                         scrollToBottom(using: proxy)
                     }
                     .onChange(of: viewModel.messages) { _, _ in
+                        scrollToBottom(using: proxy)
+                    }
+                    .onChange(of: viewModel.historyAreaHeight) { _, _ in
                         scrollToBottom(using: proxy)
                     }
                 }
@@ -2696,9 +2703,11 @@ struct QuickAskView: View {
     }
 
     private func scrollToBottom(using proxy: ScrollViewProxy) {
-        guard let last = viewModel.messages.last else { return }
         DispatchQueue.main.async {
-            proxy.scrollTo(last.id, anchor: .bottom)
+            proxy.scrollTo(chatBottomAnchorID, anchor: .bottom)
+            DispatchQueue.main.async {
+                proxy.scrollTo(chatBottomAnchorID, anchor: .bottom)
+            }
         }
     }
 }
