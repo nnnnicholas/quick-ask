@@ -25,7 +25,7 @@ The app lives above your other windows, keeps the input bar pinned while the con
 - Delete saved threads directly from the history window
 - Show a small setup screen only when history is enabled but no archive folder has been chosen yet
 - Pick your own archive folder or disable history entirely
-- Switch between Claude via Claude CLI, ChatGPT via Codex CLI, Gemini via Gemini CLI, and installed Ollama models
+- Switch between Claude via Claude CLI, ChatGPT instant or medium via Codex CLI, Gemini via Gemini CLI, and installed Ollama models
 - Recheck Claude, Codex, Gemini, and Ollama availability from `Settings…`
 - Hide or re-enable individual available models from `Settings…`
 

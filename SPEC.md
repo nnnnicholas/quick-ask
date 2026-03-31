@@ -61,7 +61,7 @@ The app name is `Quick Ask`.
 
 ### Current intended defaults
 
-- Show only the latest instant ChatGPT model in the default visible list.
+- Show the latest ChatGPT instant and medium modes as separate visible options in the default list.
 - Additional available models should be configurable in Settings.
 - Installed Ollama models should be discoverable and optionally shown.
 
@@ -181,7 +181,7 @@ These are open issues that should be fixed, tested, and pushed.
 - [x] Make Settings explain encrypted history clearly, including untrusted cloud storage safety and Keychain-based key storage.
 - [x] Ensure the encryption key is ready before any encrypted history writes happen.
 - [x] Disable the autofill/autocomplete dropdown that sometimes appears when the app is invoked.
-- [x] Show only the latest instant ChatGPT model by default.
+- [x] Show the latest ChatGPT instant and medium modes as separate visible options by default.
 - [x] Add Settings controls to enable/disable available models/providers in the visible picker.
 - [x] Keep manual refresh for providers/models and ensure unavailable models naturally disappear from the picker.
 - [x] Fix `Cmd+,` so it opens the real settings window consistently.

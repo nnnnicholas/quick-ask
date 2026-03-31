@@ -547,26 +547,26 @@ class QuickAskUITests(unittest.TestCase):
             hidden = app.command("shortcut", shortcut="cmd_w")
             self.assertFalse(hidden["panelVisible"])
 
-    def test_model_visibility_defaults_to_latest_chatgpt_and_can_be_changed(self) -> None:
+    def test_model_visibility_shows_chatgpt_modes_and_can_be_changed(self) -> None:
         with QuickAskHarness() as app:
             state = app.command("show_panel")
             state = app.wait_for(lambda current: len(current["visibleModelIDs"]) > 0, timeout=8.0)
-            self.assertIn("codex::gpt-5.4", state["visibleModelIDs"])
-            self.assertNotIn("codex::gpt-5.4-mini", state["visibleModelIDs"])
+            self.assertIn("codex::gpt-5.4-instant", state["visibleModelIDs"])
+            self.assertIn("codex::gpt-5.4-medium", state["visibleModelIDs"])
 
-            app.command("set_model_visible", text="codex::gpt-5.4-mini|1")
+            app.command("set_model_visible", text="codex::gpt-5.4-medium|0")
+            hidden = app.wait_for(
+                lambda current: "codex::gpt-5.4-medium" not in current["visibleModelIDs"],
+                timeout=8.0,
+            )
+            self.assertNotIn("codex::gpt-5.4-medium", hidden["visibleModelIDs"])
+
+            app.command("set_model_visible", text="codex::gpt-5.4-medium|1")
             enabled = app.wait_for(
-                lambda current: "codex::gpt-5.4-mini" in current["visibleModelIDs"],
+                lambda current: "codex::gpt-5.4-medium" in current["visibleModelIDs"],
                 timeout=8.0,
             )
-            self.assertIn("codex::gpt-5.4-mini", enabled["visibleModelIDs"])
-
-            app.command("set_model_visible", text="codex::gpt-5.4|0")
-            disabled = app.wait_for(
-                lambda current: "codex::gpt-5.4" not in current["visibleModelIDs"],
-                timeout=8.0,
-            )
-            self.assertNotIn("codex::gpt-5.4", disabled["visibleModelIDs"])
+            self.assertIn("codex::gpt-5.4-medium", enabled["visibleModelIDs"])
 
     def test_cmd_brackets_cycle_models_from_focused_input(self) -> None:
         with QuickAskHarness() as app:
@@ -583,45 +583,48 @@ class QuickAskUITests(unittest.TestCase):
             wrapped = app.command("shortcut", shortcut="cmd_left_bracket")
             self.assertEqual(wrapped["selectedModel"], "Qwen 2.5 14B")
 
-    def test_ctrl_tab_cycles_provider_groups_from_focused_input(self) -> None:
+    def test_ctrl_tab_cycles_visible_models_from_focused_input(self) -> None:
         with QuickAskHarness() as app:
             app.command("show_panel")
-            app.wait_for(lambda current: len(current["visibleModelIDs"]) >= 4, timeout=8.0)
+            app.wait_for(lambda current: len(current["visibleModelIDs"]) >= 6, timeout=8.0)
 
             app.command("select_model", text="claude::claude-opus-4-6")
 
-            chatgpt = app.command("shortcut", shortcut="ctrl_tab")
-            self.assertEqual(chatgpt["selectedModel"], "ChatGPT 5.4")
+            sonnet = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(sonnet["selectedModel"], "Sonnet 4.6")
+
+            instant = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(instant["selectedModel"], "ChatGPT 5.4 Instant")
+
+            medium = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(medium["selectedModel"], "ChatGPT 5.4 Medium")
 
             gemini = app.command("shortcut", shortcut="ctrl_tab")
             self.assertEqual(gemini["selectedModel"], "Gemini 3 Flash")
 
-            ollama = app.command("shortcut", shortcut="ctrl_tab")
-            self.assertEqual(ollama["selectedModel"], "Qwen 2.5 14B")
-
-            wrapped = app.command("shortcut", shortcut="ctrl_tab")
-            self.assertEqual(wrapped["selectedModel"], "Opus 4.6")
+            flash_lite = app.command("shortcut", shortcut="ctrl_tab")
+            self.assertEqual(flash_lite["selectedModel"], "Gemini Flash Lite")
 
             previous = app.command("shortcut", shortcut="ctrl_shift_tab")
-            self.assertEqual(previous["selectedModel"], "Qwen 2.5 14B")
+            self.assertEqual(previous["selectedModel"], "Gemini 3 Flash")
 
     def test_switching_models_preserves_history_and_updates_next_turn_selection(self) -> None:
         with QuickAskHarness() as app:
             app.command("show_panel")
-            app.wait_for(lambda current: "codex::gpt-5.4" in current["visibleModelIDs"], timeout=8.0)
+            app.wait_for(lambda current: "codex::gpt-5.4-instant" in current["visibleModelIDs"], timeout=8.0)
 
             app.command("set_input", text="first prompt")
             app.command("submit")
             app.command("complete_generation", text="first reply")
 
-            switched = app.command("select_model", text="codex::gpt-5.4")
-            self.assertEqual(switched["selectedModel"], "ChatGPT 5.4")
+            switched = app.command("select_model", text="codex::gpt-5.4-medium")
+            self.assertEqual(switched["selectedModel"], "ChatGPT 5.4 Medium")
             self.assertEqual(switched["messageCount"], 2)
 
             app.command("set_input", text="second prompt")
             in_flight = app.command("submit")
             self.assertTrue(in_flight["isGenerating"])
-            self.assertEqual(in_flight["selectedModel"], "ChatGPT 5.4")
+            self.assertEqual(in_flight["selectedModel"], "ChatGPT 5.4 Medium")
             self.assertEqual(in_flight["messageCount"], 4)
 
     def test_offline_defaults_to_best_visible_ollama_model(self) -> None:

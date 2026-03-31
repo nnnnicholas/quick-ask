@@ -72,22 +72,24 @@ CLAUDE_MODELS: list[dict[str, Any]] = [
 
 CODEX_MODELS: list[dict[str, Any]] = [
     {
-        "id": "codex::gpt-5.4",
+        "id": "codex::gpt-5.4-instant",
         "provider": "codex",
         "model": "gpt-5.4",
-        "label": "ChatGPT 5.4",
-        "short_label": "ChatGPT 5.4",
+        "label": "ChatGPT 5.4 Instant",
+        "short_label": "ChatGPT 5.4 Instant",
         "hint": None,
         "default": False,
+        "effort": "low",
     },
     {
-        "id": "codex::gpt-5.4-mini",
+        "id": "codex::gpt-5.4-medium",
         "provider": "codex",
-        "model": "gpt-5.4-mini",
-        "label": "ChatGPT 5.4 Mini",
-        "short_label": "ChatGPT 5.4 Mini",
+        "model": "gpt-5.4",
+        "label": "ChatGPT 5.4 Medium",
+        "short_label": "ChatGPT 5.4 Medium",
         "hint": None,
         "default": False,
+        "effort": "medium",
     },
 ]
 
@@ -737,6 +739,10 @@ def stream_claude(model: str, history: list[HistoryMessage]) -> int:
     return 0
 
 
+def codex_model_option(model_id: str) -> dict[str, Any] | None:
+    return next((option for option in CODEX_MODELS if str(option.get("id")) == model_id), None)
+
+
 def attachment_file_suffix(attachment: dict[str, str]) -> str:
     filename = attachment.get("filename") or ""
     suffix = pathlib.Path(filename).suffix
@@ -773,7 +779,7 @@ def materialize_attachment_files(history: list[HistoryMessage], target_dir: path
 
 
 def codex_shell_invocation(
-    model: str,
+    model_id: str,
     history: list[HistoryMessage],
     attachment_dir: pathlib.Path | None = None,
 ) -> tuple[list[str], pathlib.Path]:
@@ -781,6 +787,9 @@ def codex_shell_invocation(
     codex_path = command_path("codex")
     if not codex_path:
         raise RuntimeError("Codex CLI is not installed.")
+    option = codex_model_option(model_id)
+    model = str(option.get("model")) if option is not None else model_id
+    effort = str(option.get("effort")) if option is not None and option.get("effort") else ""
     SAFE_CWD.mkdir(parents=True, exist_ok=True)
     argv = [
         codex_path,
@@ -795,13 +804,15 @@ def codex_shell_invocation(
         model,
         prompt,
     ]
+    if effort:
+        argv.extend(["-c", f'model_reasoning_effort="{effort}"'])
     if attachment_dir is not None:
         for path in materialize_attachment_files(history, attachment_dir):
             argv.extend(["-i", str(path)])
     return argv, SAFE_CWD
 
 
-def stream_codex(model: str, history: list[HistoryMessage]) -> int:
+def stream_codex(model_id: str, history: list[HistoryMessage]) -> int:
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     proc: subprocess.Popen[str] | None = None
     SAFE_CWD.mkdir(parents=True, exist_ok=True)
@@ -811,7 +822,7 @@ def stream_codex(model: str, history: list[HistoryMessage]) -> int:
             temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-codex-images-", dir=SAFE_CWD)
             attachment_dir = pathlib.Path(temp_dir.name)
 
-        command, safe_cwd = codex_shell_invocation(model, history, attachment_dir=attachment_dir)
+        command, safe_cwd = codex_shell_invocation(model_id, history, attachment_dir=attachment_dir)
         proc = subprocess.Popen(
             command,
             cwd=str(safe_cwd),
@@ -1171,7 +1182,7 @@ def handle_chat(model_id: str) -> int:
     if provider == "claude":
         return stream_claude(model, history)
     if provider == "codex":
-        return stream_codex(model, history)
+        return stream_codex(model_id, history)
     if provider == "gemini":
         return stream_gemini(model, history)
     if provider == "ollama":

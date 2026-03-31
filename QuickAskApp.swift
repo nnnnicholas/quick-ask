@@ -318,7 +318,7 @@ final class QuickAskAppSettings: ObservableObject {
     private let hiddenModelIDsKey = "QuickAskHiddenModelIDs"
     private let archiveAppFolderName = "Quick Ask"
     private let archiveSessionsFolderName = "sessions"
-    private let defaultHiddenModelIDs: Set<String> = ["codex::gpt-5.4-mini"]
+    private let defaultHiddenModelIDs: Set<String> = []
     private var hiddenModelIDs: Set<String>
 
     init(defaults: UserDefaults = quickAskUserDefaults()) {
@@ -804,8 +804,8 @@ final class QuickAskViewModel: ObservableObject {
         [
             ModelOption(id: "claude::claude-opus-4-6", provider: "claude", model: "claude-opus-4-6", label: "Claude Opus 4.6", short_label: "Opus 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: true),
             ModelOption(id: "claude::claude-sonnet-4-6", provider: "claude", model: "claude-sonnet-4-6", label: "Claude Sonnet 4.6", short_label: "Sonnet 4.6", hint: "Claude CLI login", endpoint: "claude://login", default: false),
-            ModelOption(id: "codex::gpt-5.4", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4", short_label: "ChatGPT 5.4", hint: "Codex CLI login", endpoint: "codex://login", default: false),
-            ModelOption(id: "codex::gpt-5.4-mini", provider: "codex", model: "gpt-5.4-mini", label: "ChatGPT 5.4 Mini", short_label: "ChatGPT 5.4 Mini", hint: "Codex CLI login", endpoint: "codex://login", default: false),
+            ModelOption(id: "codex::gpt-5.4-instant", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4 Instant", short_label: "ChatGPT 5.4 Instant", hint: "Codex CLI login", endpoint: "codex://login", default: false),
+            ModelOption(id: "codex::gpt-5.4-medium", provider: "codex", model: "gpt-5.4", label: "ChatGPT 5.4 Medium", short_label: "ChatGPT 5.4 Medium", hint: "Codex CLI login", endpoint: "codex://login", default: false),
             ModelOption(id: "gemini::gemini-3-flash-preview", provider: "gemini", model: "gemini-3-flash-preview", label: "Gemini 3 Flash", short_label: "Gemini 3 Flash", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
             ModelOption(id: "gemini::gemini-2.5-flash-lite", provider: "gemini", model: "gemini-2.5-flash-lite", label: "Gemini Flash Lite", short_label: "Gemini Flash Lite", hint: "Gemini CLI login", endpoint: "gemini://login", default: false),
             ModelOption(id: "ollama::qwen2.5:14b", provider: "ollama", model: "qwen2.5:14b", label: "Qwen 2.5 14B", short_label: "Qwen 2.5 14B", hint: "Ollama model", endpoint: "ollama://local", default: false),
