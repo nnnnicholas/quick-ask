@@ -506,6 +506,30 @@ class QuickAskUITests(unittest.TestCase):
             self.assertEqual(after_timeout["messageCount"], 0)
             self.assertEqual(after_timeout["inputText"], "")
 
+    def test_panel_resize_is_available_only_after_conversation_starts_and_resets_on_reopen(self) -> None:
+        with QuickAskHarness() as app:
+            shown = app.command("show_panel")
+            initial_width = shown["panelFrame"]["width"]
+            initial_height = shown["panelFrame"]["height"]
+
+            before_history = app.command("resize_panel", text="760|260")
+            self.assertEqual(before_history["panelFrame"]["width"], initial_width)
+            self.assertEqual(before_history["panelFrame"]["height"], initial_height)
+
+            app.command("set_input", text="hello")
+            app.command("submit")
+            with_history = app.command("complete_generation", text="reply")
+            self.assertEqual(with_history["messageCount"], 2)
+
+            resized = app.command("resize_panel", text="760|260")
+            self.assertAlmostEqualPx(resized["panelFrame"]["width"], 760.0)
+            self.assertAlmostEqualPx(resized["panelFrame"]["height"], 260.0)
+
+            app.command("hide_panel")
+            restored = app.command("show_panel")
+            self.assertAlmostEqualPx(restored["panelFrame"]["width"], 560.0)
+            self.assertNotEqual(restored["panelFrame"]["height"], 260.0)
+
     def test_duplicate_launch_does_not_open_panel(self) -> None:
         with QuickAskHarness(enable_singleton=True) as app:
             initial = app.read_state()

@@ -279,6 +279,17 @@ private struct InputBarFrameKey: PreferenceKey {
     }
 }
 
+private struct PanelSizeKey: PreferenceKey {
+    static var defaultValue: CGSize = .zero
+
+    static func reduce(value: inout CGSize, nextValue: () -> CGSize) {
+        let next = nextValue()
+        if next.width > 0, next.height > 0 {
+            value = next
+        }
+    }
+}
+
 private enum QuickAskTheme {
     static let frameBackground = Color(red: 0.55, green: 0.79, blue: 0.77)
     static let historyBackground = Color(red: 0.55, green: 0.79, blue: 0.77)
@@ -600,6 +611,7 @@ private struct QuickAskUITestCommand: Codable {
 @MainActor
 protocol QuickAskLayoutDelegate: AnyObject {
     func quickAskNeedsLayout()
+    func quickAskResizePanel(to size: CGSize)
 }
 
 @MainActor
@@ -620,6 +632,8 @@ final class QuickAskViewModel: ObservableObject {
     @Published var pendingAttachments: [ChatAttachment] = []
     @Published var inputBarFrame: CGRect = .zero
     @Published var historyAreaHeight: CGFloat = 0
+    @Published var automaticPanelHeight: CGFloat = 70
+    @Published var manualExtraHistoryHeight: CGFloat = 0
     @Published var models: [ModelOption] = []
     @Published var selectedModelID = "claude::claude-opus-4-6"
     @Published var isGenerating = false
@@ -711,6 +725,20 @@ final class QuickAskViewModel: ObservableObject {
         if abs(clamped - historyAreaHeight) > 0.5 {
             historyAreaHeight = clamped
             layoutDelegate?.quickAskNeedsLayout()
+        }
+    }
+
+    func setAutomaticPanelHeight(_ value: CGFloat) {
+        let clamped = max(70, value)
+        if abs(clamped - automaticPanelHeight) > 0.5 {
+            automaticPanelHeight = clamped
+        }
+    }
+
+    func setManualExtraHistoryHeight(_ value: CGFloat) {
+        let clamped = max(0, value)
+        if abs(clamped - manualExtraHistoryHeight) > 0.5 {
+            manualExtraHistoryHeight = clamped
         }
     }
 
@@ -846,6 +874,7 @@ final class QuickAskViewModel: ObservableObject {
         messages = []
         queuedPrompts = []
         historyAreaHeight = 0
+        manualExtraHistoryHeight = 0
         clearRetryContext()
         if !preserveInput {
             inputText = ""
@@ -2785,6 +2814,8 @@ struct QuickAskView: View {
     let onOpenHistory: () -> Void
     let onOpenSettings: () -> Void
     private let chatBottomAnchorID = "quick-ask-chat-bottom-anchor"
+    @State private var currentPanelSize = CGSize(width: 560, height: 70)
+    @State private var resizeStartSize: CGSize?
 
     private func actionButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
@@ -2797,11 +2828,48 @@ struct QuickAskView: View {
             .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
     }
 
+    private var canResizePanel: Bool {
+        !viewModel.messages.isEmpty
+    }
+
+    private var extraHistoryHeight: CGFloat {
+        guard canResizePanel else { return 0 }
+        return viewModel.manualExtraHistoryHeight
+    }
+
+    private var resizeHandle: some View {
+        Image(systemName: "arrow.up.left.and.arrow.down.right")
+            .font(.system(size: 10, weight: .semibold))
+            .foregroundStyle(QuickAskTheme.mutedText)
+            .frame(width: 20, height: 20)
+            .background(QuickAskTheme.inputBackground.opacity(0.96))
+            .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
+            .contentShape(Rectangle())
+            .gesture(
+                DragGesture(minimumDistance: 0)
+                    .onChanged { value in
+                        if resizeStartSize == nil {
+                            resizeStartSize = currentPanelSize
+                        }
+                        let start = resizeStartSize ?? currentPanelSize
+                        let requested = CGSize(
+                            width: start.width + value.translation.width,
+                            height: start.height - value.translation.height
+                        )
+                        viewModel.layoutDelegate?.quickAskResizePanel(to: requested)
+                    }
+                    .onEnded { _ in
+                        resizeStartSize = nil
+                    }
+            )
+    }
+
     var body: some View {
         VStack(spacing: 0) {
             if !viewModel.messages.isEmpty {
                 ScrollViewReader { proxy in
-                    ScrollView(.vertical, showsIndicators: viewModel.historyAreaHeight >= 450) {
+                    let visibleHistoryHeight = viewModel.historyAreaHeight + extraHistoryHeight
+                    ScrollView(.vertical, showsIndicators: visibleHistoryHeight >= 450) {
                         VStack(spacing: 8) {
                             ForEach(viewModel.messages) { message in
                                 MessageBubble(message: message)
@@ -2818,7 +2886,7 @@ struct QuickAskView: View {
                             }
                         )
                     }
-                    .frame(height: viewModel.historyAreaHeight)
+                    .frame(height: visibleHistoryHeight)
                     .background(QuickAskTheme.historyBackground)
                     .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
                     .onPreferenceChange(HistoryHeightKey.self) { value in
@@ -2991,14 +3059,31 @@ struct QuickAskView: View {
                 }
             }
         }
-        .frame(width: 560)
+        .frame(minWidth: 560, maxWidth: .infinity)
         .background(QuickAskTheme.frameBackground)
+        .background(
+            GeometryReader { proxy in
+                Color.clear.preference(key: PanelSizeKey.self, value: proxy.size)
+            }
+        )
+        .overlay(alignment: .bottomTrailing) {
+            if canResizePanel {
+                resizeHandle
+                    .padding(.trailing, 6)
+                    .padding(.bottom, 6)
+            }
+        }
         .environment(\.openURL, OpenURLAction { url in
             NSWorkspace.shared.open(url)
             return .handled
         })
         .onPreferenceChange(InputBarFrameKey.self) { value in
             viewModel.setInputBarFrame(value)
+        }
+        .onPreferenceChange(PanelSizeKey.self) { value in
+            if value.width > 0, value.height > 0 {
+                currentPanelSize = value
+            }
         }
     }
 
@@ -3383,6 +3468,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         quickAskNeedsLayout(for: primaryPanelContext.id)
     }
 
+    func quickAskResizePanel(to size: CGSize) {
+        let context = activeChatPanelContext(preferVisible: false) ?? primaryPanelContext
+        resizeChatPanel(for: context.id, to: size)
+    }
+
     func quickAskNeedsLayout(for panelID: UUID) {
         guard let context = chatPanelContext(for: panelID) else { return }
         let panel = context.panel
@@ -3390,9 +3480,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         hostingView.layoutSubtreeIfNeeded()
         let fitting = hostingView.fittingSize
         let automaticWidth: CGFloat = 560
-        let automaticHeight = round(max(44, min(fitting.height, 560)))
+        let manualExtraHeight = max(0, context.viewModel.manualExtraHistoryHeight)
+        let naturalFittingHeight = max(44, fitting.height - manualExtraHeight)
+        let automaticHeight = round(max(44, min(naturalFittingHeight, 560)))
+        let resizeEnabled = !context.viewModel.messages.isEmpty
         let testOriginX: CGFloat = 700
         let testBottomY: CGFloat = 120
+
+        context.viewModel.setAutomaticPanelHeight(automaticHeight)
+        if resizeEnabled {
+            panel.styleMask.insert(.resizable)
+        } else {
+            panel.styleMask.remove(.resizable)
+        }
 
         var frame = panel.frame
         context.isProgrammaticMove = true
@@ -3417,17 +3517,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             frame.size.height = automaticHeight
             context.panelBottomY = anchoredBottomY
             context.userResizedSize = nil
+            context.viewModel.setManualExtraHistoryHeight(0)
         } else {
             let anchoredBottomY = uiTestMode ? testBottomY : round(context.panelBottomY ?? panel.frame.minY)
-            let targetSize = uiTestMode
-                ? NSSize(width: automaticWidth, height: automaticHeight)
-                : (context.userResizedSize ?? NSSize(width: automaticWidth, height: automaticHeight))
+            let targetWidth = max(automaticWidth, context.userResizedSize?.width ?? automaticWidth)
+            let targetHeight = max(automaticHeight, automaticHeight + manualExtraHeight)
             if uiTestMode && context.isPrimary {
                 frame.origin.x = testOriginX
             }
             frame.origin.y = anchoredBottomY
-            frame.size.height = targetSize.height
-            frame.size.width = targetSize.width
+            frame.size.height = targetHeight
+            frame.size.width = targetWidth
             context.panelBottomY = anchoredBottomY
         }
         panel.setFrame(frame, display: true)
@@ -3441,6 +3541,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             self?.chatPanelContext(for: panelID)?.isProgrammaticMove = false
         }
         uiTestHarness?.writeState()
+    }
+
+    func resizeChatPanel(for panelID: UUID, to requestedSize: CGSize) {
+        guard let context = chatPanelContext(for: panelID) else { return }
+        guard !context.viewModel.messages.isEmpty else { return }
+
+        let panel = context.panel
+        let visible = panel.screen?.visibleFrame ?? currentScreen()?.visibleFrame ?? NSScreen.main?.visibleFrame ?? NSRect(x: 0, y: 0, width: 1440, height: 900)
+        let anchoredBottomY = round(context.panelBottomY ?? panel.frame.minY)
+        let maxWidth = max(560, floor(visible.width))
+        let minHeight = max(70, context.viewModel.automaticPanelHeight)
+        let maxHeight = max(minHeight, floor(visible.maxY - anchoredBottomY))
+        let clampedWidth = round(min(max(560, requestedSize.width), maxWidth))
+        let clampedHeight = round(min(max(minHeight, requestedSize.height), maxHeight))
+        let extraHistoryHeight = max(0, clampedHeight - context.viewModel.automaticPanelHeight)
+
+        context.isProgrammaticMove = true
+        context.viewModel.setManualExtraHistoryHeight(extraHistoryHeight)
+        context.userResizedSize = NSSize(width: clampedWidth, height: clampedHeight)
+        context.panelBottomY = anchoredBottomY
+        quickAskNeedsLayout(for: panelID)
+        var frame = panel.frame
+        frame.origin.x = min(max(frame.origin.x, visible.minX), visible.maxX - frame.width)
+        panel.setFrameOrigin(frame.origin)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            self?.chatPanelContext(for: panelID)?.isProgrammaticMove = false
+            self?.uiTestHarness?.writeState()
+        }
     }
 
     private func chatPanelContext(for panelID: UUID) -> ChatPanelContext? {
@@ -4029,7 +4157,17 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         guard let context = chatPanelContext(for: notification.object as? NSWindow) else { return }
         guard !context.isProgrammaticMove else { return }
         guard context.panel.isVisible else { return }
-        context.userResizedSize = context.panel.frame.size
+        guard !context.viewModel.messages.isEmpty else {
+            context.userResizedSize = nil
+            context.viewModel.setManualExtraHistoryHeight(0)
+            context.panelBottomY = context.panel.frame.minY
+            uiTestHarness?.writeState()
+            return
+        }
+        let height = context.panel.frame.height
+        let extraHeight = max(0, height - context.viewModel.automaticPanelHeight)
+        context.viewModel.setManualExtraHistoryHeight(extraHeight)
+        context.userResizedSize = NSSize(width: context.panel.frame.width, height: height)
         context.panelBottomY = context.panel.frame.minY
         if context.isPrimary {
             defaults.set(context.panel.frame.minX, forKey: panelOriginXKey)
@@ -4114,6 +4252,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             activeContext.viewModel.inputText = command.text ?? ""
             activeContext.viewModel.touch()
             quickAskNeedsLayout(for: activeContext.id)
+        case "resize_panel":
+            if let text = command.text,
+               let separator = text.lastIndex(of: "|"),
+               let width = Double(String(text[..<separator]).trimmingCharacters(in: .whitespacesAndNewlines)),
+               let height = Double(String(text[text.index(after: separator)...]).trimmingCharacters(in: .whitespacesAndNewlines)) {
+                resizeChatPanel(for: activeContext.id, to: CGSize(width: width, height: height))
+            }
         case "show_settings":
             showSettingsWindow()
         case "show_shortcuts":
@@ -4232,6 +4377,10 @@ final class ChatPanelLayoutProxy: QuickAskLayoutDelegate {
 
     func quickAskNeedsLayout() {
         appDelegate?.quickAskNeedsLayout(for: panelID)
+    }
+
+    func quickAskResizePanel(to size: CGSize) {
+        appDelegate?.resizeChatPanel(for: panelID, to: size)
     }
 }
 
