@@ -543,6 +543,16 @@ class QuickAskUITests(unittest.TestCase):
             resized_top = resized["panelFrame"]["y"] + resized["panelFrame"]["height"]
             self.assertAlmostEqualPx(resized_top, original_top)
 
+    def test_panel_drag_mode_and_history_window_chrome_regression(self) -> None:
+        with QuickAskHarness() as app:
+            shown = app.command("show_panel")
+            self.assertTrue(shown["panelContentDragEnabled"])
+            self.assertFalse(shown["panelBackgroundDragEnabled"])
+
+            history = app.command("shortcut", shortcut="cmd_shift_backslash")
+            self.assertTrue(history["historyWindowVisible"])
+            self.assertFalse(history["historyWindowHasTitleBar"])
+
     def test_duplicate_launch_does_not_open_panel(self) -> None:
         with QuickAskHarness(enable_singleton=True) as app:
             initial = app.read_state()

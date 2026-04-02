@@ -567,6 +567,9 @@ private struct QuickAskUITestState: Codable {
     let settingsWindowVisible: Bool
     let shortcutsWindowVisible: Bool
     let panelIsKeyWindow: Bool
+    let panelContentDragEnabled: Bool
+    let panelBackgroundDragEnabled: Bool
+    let historyWindowHasTitleBar: Bool
     let panelFrame: CodableRect
     let settingsFrame: CodableRect
     let inputBarFrame: CodableRect
@@ -4296,6 +4299,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             settingsWindowVisible: settingsWindow?.isVisible ?? false,
             shortcutsWindowVisible: shortcutsWindow?.isVisible ?? false,
             panelIsKeyWindow: panel?.isKeyWindow ?? false,
+            panelContentDragEnabled: context?.hostingView.mouseDownCanMoveWindow ?? false,
+            panelBackgroundDragEnabled: panel?.isMovableByWindowBackground ?? false,
+            historyWindowHasTitleBar: historyWindow?.styleMask.contains(.titled) ?? false,
             panelFrame: CodableRect(panel?.frame ?? .zero),
             settingsFrame: CodableRect(settingsWindow?.frame ?? .zero),
             inputBarFrame: CodableRect(viewModel?.inputBarFrame ?? .zero),
