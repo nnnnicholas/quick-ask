@@ -2798,21 +2798,6 @@ final class SuggestionFreeTextField: NSTextField {
     }
 }
 
-struct WindowDragSurface: NSViewRepresentable {
-    final class SurfaceView: NSView {
-        override var mouseDownCanMoveWindow: Bool { true }
-    }
-
-    func makeNSView(context: Context) -> SurfaceView {
-        let view = SurfaceView(frame: .zero)
-        view.wantsLayer = true
-        view.layer?.backgroundColor = NSColor.clear.cgColor
-        return view
-    }
-
-    func updateNSView(_ nsView: SurfaceView, context: Context) {}
-}
-
 struct PanelEdgeResizeOverlay: NSViewRepresentable {
     let enabled: Bool
     let onResize: (CGSize, Bool, Bool) -> Void
@@ -3139,7 +3124,6 @@ struct QuickAskView: View {
             }
         }
         .frame(minWidth: 560, maxWidth: .infinity)
-        .background(WindowDragSurface())
         .background(QuickAskTheme.frameBackground)
         .overlay(
             PanelEdgeResizeOverlay(enabled: !viewModel.messages.isEmpty) { requested, preserveTopEdge, preserveRightEdge in
@@ -3362,11 +3346,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 
         historyWindow = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 520, height: 420),
-            styleMask: [.titled, .closable, .resizable, .fullSizeContentView],
+            styleMask: [.borderless, .resizable, .fullSizeContentView],
             backing: .buffered,
             defer: false
         )
-        historyWindow.title = "Quick Ask History"
         historyWindow.isReleasedWhenClosed = false
         historyWindow.isOpaque = true
         historyWindow.backgroundColor = NSColor(calibratedRed: 0.55, green: 0.79, blue: 0.77, alpha: 1)
@@ -3374,7 +3357,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         historyWindow.hasShadow = true
         historyWindow.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary]
         historyWindow.hidesOnDeactivate = false
-        historyWindow.isMovableByWindowBackground = false
+        historyWindow.isMovableByWindowBackground = true
+        historyWindow.standardWindowButton(.closeButton)?.isHidden = true
+        historyWindow.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        historyWindow.standardWindowButton(.zoomButton)?.isHidden = true
         historyWindow.contentView = historyHostingView
         historyWindow.setFrameAutosaveName("QuickAskHistoryWindowFrame")
         if !historyWindow.setFrameUsingName("QuickAskHistoryWindowFrame") {
@@ -3729,6 +3715,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         panel.hidesOnDeactivate = false
         panel.isMovableByWindowBackground = false
         panel.minSize = NSSize(width: 420, height: 70)
+        panel.standardWindowButton(.closeButton)?.isHidden = true
+        panel.standardWindowButton(.miniaturizeButton)?.isHidden = true
+        panel.standardWindowButton(.zoomButton)?.isHidden = true
         panel.contentView = hostingView
         panel.orderOut(nil)
         panel.onNewChat = { [weak self] in
@@ -4470,7 +4459,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 }
 
 final class MovableHostingView<Content: View>: NSHostingView<Content> {
-    override var mouseDownCanMoveWindow: Bool { false }
+    override var mouseDownCanMoveWindow: Bool { true }
 }
 
 @MainActor
