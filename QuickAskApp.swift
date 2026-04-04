@@ -287,6 +287,7 @@ private enum QuickAskTheme {
     static let strongText = Color(red: 0.03, green: 0.16, blue: 0.16)
     static let mutedText = Color(red: 0.03, green: 0.16, blue: 0.16).opacity(0.78)
     static let panelAccent = Color.white.opacity(0.18)
+    static let successAccent = Color(red: 0.08, green: 0.52, blue: 0.34)
 }
 
 private func quickAskUserDefaults() -> UserDefaults {
@@ -570,6 +571,8 @@ private struct QuickAskUITestState: Codable {
     let panelContentDragEnabled: Bool
     let panelBackgroundDragEnabled: Bool
     let historyWindowHasTitleBar: Bool
+    let panelLastDragHitViewClass: String
+    let panelLastDragAccepted: Bool
     let panelFrame: CodableRect
     let settingsFrame: CodableRect
     let inputBarFrame: CodableRect
@@ -1493,6 +1496,7 @@ final class QuickAskHistoryViewModel: ObservableObject {
     @Published var sessions: [QuickAskHistorySession] = []
     @Published var isLoading = false
     @Published var statusText = ""
+    @Published var selectedSessionID: String?
     @Published private(set) var deletingSessionIDs: Set<String> = []
 
     private let backendPath: String
@@ -1552,6 +1556,7 @@ final class QuickAskHistoryViewModel: ObservableObject {
             guard let self else { return }
             if let payload = result.payload {
                 self.sessions = payload.sessions
+                self.ensureValidSelection()
                 self.isLoading = false
             } else {
                 self.statusText = result.message ?? "Could not load history."
@@ -1600,14 +1605,51 @@ final class QuickAskHistoryViewModel: ObservableObject {
                 self.statusText = result
             } else {
                 self.sessions.removeAll { $0.sessionID == sessionID }
+                self.ensureValidSelection()
                 self.reload()
             }
         }
+    }
+
+    func ensureValidSelection() {
+        guard !sessions.isEmpty else {
+            selectedSessionID = nil
+            return
+        }
+        if let selectedSessionID,
+           sessions.contains(where: { $0.sessionID == selectedSessionID }) {
+            return
+        }
+        selectedSessionID = sessions.first?.sessionID
+    }
+
+    func moveSelection(delta: Int) {
+        guard !sessions.isEmpty else {
+            selectedSessionID = nil
+            return
+        }
+
+        let currentIndex: Int
+        if let selectedSessionID,
+           let index = sessions.firstIndex(where: { $0.sessionID == selectedSessionID }) {
+            currentIndex = index
+        } else {
+            currentIndex = 0
+        }
+
+        let nextIndex = min(max(currentIndex + delta, 0), sessions.count - 1)
+        selectedSessionID = sessions[nextIndex].sessionID
+    }
+
+    var selectedSession: QuickAskHistorySession? {
+        guard let selectedSessionID else { return nil }
+        return sessions.first(where: { $0.sessionID == selectedSessionID })
     }
 }
 
 struct QuickAskHistoryRow: View {
     let session: QuickAskHistorySession
+    let isSelected: Bool
     let isDeleting: Bool
     let onSelect: () -> Void
     let onDelete: () -> Void
@@ -1687,7 +1729,13 @@ struct QuickAskHistoryRow: View {
             }
             .padding(.horizontal, 12)
             .padding(.vertical, 11)
-            .background(QuickAskTheme.historyBackground)
+            .background(isSelected ? QuickAskTheme.panelAccent.opacity(1) : QuickAskTheme.historyBackground)
+            .overlay {
+                if isSelected {
+                    Rectangle()
+                        .stroke(QuickAskTheme.strongText.opacity(0.32), lineWidth: 1)
+                }
+            }
 
             Rectangle()
                 .fill(QuickAskTheme.dividerColor)
@@ -1699,7 +1747,6 @@ struct QuickAskHistoryRow: View {
 struct QuickAskHistoryView: View {
     @ObservedObject var viewModel: QuickAskHistoryViewModel
     let onSelectSession: (QuickAskHistorySession) -> Void
-    let onClose: () -> Void
 
     private func commandButton(_ title: String, action: @escaping () -> Void) -> some View {
         Button(title, action: action)
@@ -1723,12 +1770,6 @@ struct QuickAskHistoryView: View {
                 Spacer()
                 commandButton("Refresh") {
                     viewModel.reload()
-                }
-                Rectangle()
-                    .fill(QuickAskTheme.dividerColor)
-                    .frame(width: 1, height: 18)
-                commandButton("Close") {
-                    onClose()
                 }
             }
             .padding(.horizontal, 14)
@@ -1760,8 +1801,10 @@ struct QuickAskHistoryView: View {
                             ForEach(viewModel.sessions) { session in
                                 QuickAskHistoryRow(
                                     session: session,
+                                    isSelected: viewModel.selectedSessionID == session.sessionID,
                                     isDeleting: viewModel.deletingSessionIDs.contains(session.sessionID),
                                     onSelect: {
+                                        viewModel.selectedSessionID = session.sessionID
                                         onSelectSession(session)
                                     },
                                     onDelete: {
@@ -1780,6 +1823,8 @@ struct QuickAskHistoryView: View {
         .onAppear {
             if viewModel.sessions.isEmpty {
                 viewModel.reload()
+            } else {
+                viewModel.ensureValidSelection()
             }
         }
     }
@@ -2123,9 +2168,45 @@ struct QuickAskKeyboardShortcutsView: View {
 
 final class QuickAskPanel: NSPanel {
     var onNewChat: (() -> Void)?
+    private var isDraggingFromBackground = false
+    private var dragStartScreenPoint = NSPoint.zero
+    private var dragStartFrame = NSRect.zero
+    var lastDragHitViewClass = ""
+    var lastDragAccepted = false
 
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { true }
+
+    override func sendEvent(_ event: NSEvent) {
+        switch event.type {
+        case .leftMouseDown:
+            let dragDecision = shouldStartBackgroundDrag(with: event)
+            lastDragAccepted = dragDecision
+            if dragDecision {
+                isDraggingFromBackground = true
+                dragStartScreenPoint = screenPoint(for: event.locationInWindow)
+                dragStartFrame = frame
+                return
+            }
+        case .leftMouseDragged:
+            if isDraggingFromBackground {
+                let currentPoint = screenPoint(for: event.locationInWindow)
+                let deltaX = currentPoint.x - dragStartScreenPoint.x
+                let deltaY = currentPoint.y - dragStartScreenPoint.y
+                setFrameOrigin(NSPoint(x: dragStartFrame.origin.x + deltaX, y: dragStartFrame.origin.y + deltaY))
+                return
+            }
+        case .leftMouseUp:
+            if isDraggingFromBackground {
+                isDraggingFromBackground = false
+                return
+            }
+        default:
+            break
+        }
+
+        super.sendEvent(event)
+    }
 
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
@@ -2136,6 +2217,38 @@ final class QuickAskPanel: NSPanel {
             return true
         }
         return super.performKeyEquivalent(with: event)
+    }
+
+    private func shouldStartBackgroundDrag(with event: NSEvent) -> Bool {
+        guard let contentView else { return false }
+
+        let point = event.locationInWindow
+        guard let hitView = contentView.hitTest(point) else {
+            lastDragHitViewClass = ""
+            return true
+        }
+
+        lastDragHitViewClass = NSStringFromClass(type(of: hitView))
+
+        var currentView: NSView? = hitView
+        while let view = currentView {
+            if view is NSControl || view is NSTextView {
+                return false
+            }
+
+            let className = NSStringFromClass(type(of: view))
+            if className.contains("PanelEdgeResizeOverlay") || className.contains("OverlayView") {
+                return false
+            }
+
+            currentView = view.superview
+        }
+
+        return true
+    }
+
+    private func screenPoint(for point: NSPoint) -> NSPoint {
+        convertToScreen(NSRect(origin: point, size: .zero)).origin
     }
 }
 
@@ -2246,14 +2359,30 @@ struct MessageBubble: View {
         !message.content.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
 
+    private var copyButtonForeground: Color {
+        justCopied ? Color.white : QuickAskTheme.strongText.opacity(0.78)
+    }
+
+    private var copyButtonBackground: Color {
+        justCopied ? QuickAskTheme.successAccent : Color.white.opacity(0.18)
+    }
+
+    private var copyButtonBorder: Color {
+        justCopied ? QuickAskTheme.successAccent.opacity(0.96) : QuickAskTheme.dividerColor
+    }
+
     private func copyMessage() {
         guard canCopy else { return }
         let pasteboard = NSPasteboard.general
         pasteboard.clearContents()
         pasteboard.setString(message.content, forType: .string)
-        justCopied = true
+        withAnimation(.easeOut(duration: 0.18)) {
+            justCopied = true
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.9) {
-            justCopied = false
+            withAnimation(.easeIn(duration: 0.18)) {
+                justCopied = false
+            }
         }
     }
 
@@ -2271,7 +2400,7 @@ struct MessageBubble: View {
             }
             .padding(.horizontal, 10)
             .padding(.vertical, 8)
-            .padding(.trailing, canCopy ? 24 : 10)
+            .padding(.trailing, canCopy ? 72 : 10)
             .frame(maxWidth: 360, alignment: .leading)
             .background(
                 Rectangle()
@@ -2284,15 +2413,26 @@ struct MessageBubble: View {
             .overlay(alignment: .topTrailing) {
                 if canCopy {
                     Button(action: copyMessage) {
-                        Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
-                            .font(.system(size: 10, weight: .semibold))
-                            .foregroundStyle(QuickAskTheme.strongText.opacity(0.78))
-                            .frame(width: 18, height: 18)
-                            .background(Rectangle().fill(Color.white.opacity(0.18)))
-                            .overlay(Rectangle().stroke(QuickAskTheme.dividerColor, lineWidth: 1))
+                        HStack(spacing: 4) {
+                            Image(systemName: justCopied ? "checkmark" : "doc.on.doc")
+                                .font(.system(size: 10, weight: .semibold))
+                            if justCopied {
+                                Text("Copied")
+                                    .font(.system(size: 10, weight: .semibold))
+                                    .transition(.opacity.combined(with: .move(edge: .trailing)))
+                            }
+                        }
+                        .foregroundStyle(copyButtonForeground)
+                        .padding(.horizontal, justCopied ? 7 : 0)
+                        .frame(minWidth: justCopied ? 58 : 18, minHeight: 18)
+                        .background(Rectangle().fill(copyButtonBackground))
+                        .overlay(Rectangle().stroke(copyButtonBorder, lineWidth: 1))
+                        .shadow(color: QuickAskTheme.successAccent.opacity(justCopied ? 0.22 : 0), radius: 5, y: 1)
+                        .scaleEffect(justCopied ? 1.08 : 1.0)
                     }
                     .buttonStyle(.plain)
                     .opacity(isHovering || justCopied ? 1 : 0)
+                    .animation(.spring(response: 0.22, dampingFraction: 0.62), value: justCopied)
                     .padding(5)
                 }
             }
@@ -3302,9 +3442,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 viewModel: historyViewModel,
                 onSelectSession: { [weak self] session in
                     self?.restoreSession(session)
-                },
-                onClose: { [weak self] in
-                    self?.hideHistoryWindow()
                 }
             )
         )
@@ -3425,6 +3562,37 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             guard let self else { return event }
             let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
             let keyPanelContext = self.keyChatPanelContext()
+            if self.historyWindow.isVisible, flags.isEmpty {
+                switch Int(event.keyCode) {
+                case kVK_DownArrow, kVK_ANSI_J:
+                    self.historyViewModel.moveSelection(delta: 1)
+                    return nil
+                case kVK_UpArrow, kVK_ANSI_K:
+                    self.historyViewModel.moveSelection(delta: -1)
+                    return nil
+                case kVK_Return, kVK_ANSI_KeypadEnter:
+                    if let session = self.historyViewModel.selectedSession {
+                        self.restoreSession(session)
+                        return nil
+                    }
+                default:
+                    break
+                }
+
+                if event.charactersIgnoringModifiers == "j" {
+                    self.historyViewModel.moveSelection(delta: 1)
+                    return nil
+                }
+                if event.charactersIgnoringModifiers == "k" {
+                    self.historyViewModel.moveSelection(delta: -1)
+                    return nil
+                }
+                if event.charactersIgnoringModifiers == "\r",
+                   let session = self.historyViewModel.selectedSession {
+                    self.restoreSession(session)
+                    return nil
+                }
+            }
             if flags == [.command],
                event.charactersIgnoringModifiers?.lowercased() == "w" {
                 if self.shortcutsWindow.isVisible, self.shortcutsWindow.isKeyWindow {
@@ -4034,6 +4202,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
 
         QuickAskLog.shared.write("toggleHistoryWindow showing history")
         historyViewModel.reload()
+        historyViewModel.ensureValidSelection()
         historyWindow.makeKeyAndOrderFront(nil)
         historyWindow.orderFrontRegardless()
         NSApp.activate(ignoringOtherApps: true)
@@ -4302,6 +4471,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             panelContentDragEnabled: context?.hostingView.mouseDownCanMoveWindow ?? false,
             panelBackgroundDragEnabled: panel?.isMovableByWindowBackground ?? false,
             historyWindowHasTitleBar: historyWindow?.styleMask.contains(.titled) ?? false,
+            panelLastDragHitViewClass: panel?.lastDragHitViewClass ?? "",
+            panelLastDragAccepted: panel?.lastDragAccepted ?? false,
             panelFrame: CodableRect(panel?.frame ?? .zero),
             settingsFrame: CodableRect(settingsWindow?.frame ?? .zero),
             inputBarFrame: CodableRect(viewModel?.inputBarFrame ?? .zero),
@@ -4360,6 +4531,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                         preserveTopEdge: preserveTopEdge,
                         preserveRightEdge: preserveRightEdge
                     )
+                }
+            }
+        case "drag_panel":
+            if let text = command.text {
+                let parts = text.split(separator: "|", omittingEmptySubsequences: false).map(String.init)
+                if parts.count >= 2,
+                   let deltaX = Double(parts[0].trimmingCharacters(in: .whitespacesAndNewlines)),
+                   let deltaY = Double(parts[1].trimmingCharacters(in: .whitespacesAndNewlines)) {
+                    simulatePanelDragForUITest(activeContext.panel, deltaX: CGFloat(deltaX), deltaY: CGFloat(deltaY))
                 }
             }
         case "show_settings":
@@ -4462,10 +4642,55 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
         }
         uiTestHarness?.writeState()
     }
+
+    private func simulatePanelDragForUITest(_ panel: NSWindow, deltaX: CGFloat, deltaY: CGFloat) {
+        guard let contentView = panel.contentView else { return }
+
+        let startPoint = NSPoint(x: 6, y: max(10, min(contentView.bounds.midY, contentView.bounds.height - 10)))
+        let steps = 6
+
+        for step in 0...steps {
+            let progress = CGFloat(step) / CGFloat(steps)
+            let point = NSPoint(
+                x: startPoint.x + deltaX * progress,
+                y: startPoint.y + deltaY * progress
+            )
+
+            let type: NSEvent.EventType
+            let clickCount: Int
+            if step == 0 {
+                type = .leftMouseDown
+                clickCount = 1
+            } else if step == steps {
+                type = .leftMouseUp
+                clickCount = 1
+            } else {
+                type = .leftMouseDragged
+                clickCount = 0
+            }
+
+            guard let event = NSEvent.mouseEvent(
+                with: type,
+                location: point,
+                modifierFlags: [],
+                timestamp: ProcessInfo.processInfo.systemUptime + TimeInterval(step) * 0.01,
+                windowNumber: panel.windowNumber,
+                context: nil,
+                eventNumber: step,
+                clickCount: clickCount,
+                pressure: 1
+            ) else {
+                continue
+            }
+
+            panel.sendEvent(event)
+            RunLoop.current.run(until: Date().addingTimeInterval(0.01))
+        }
+    }
 }
 
 final class MovableHostingView<Content: View>: NSHostingView<Content> {
-    override var mouseDownCanMoveWindow: Bool { true }
+    override var mouseDownCanMoveWindow: Bool { false }
 }
 
 @MainActor

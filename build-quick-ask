@@ -10,6 +10,7 @@ RES_DIR="${APP_DIR}/Contents/Resources"
 PLIST_PATH="${APP_DIR}/Contents/Info.plist"
 LAUNCH_AGENT="$HOME/Library/LaunchAgents/${BUNDLE_ID}.plist"
 SKIP_LAUNCH_AGENT="${QUICK_ASK_SKIP_LAUNCH_AGENT:-0}"
+LAUNCH_DOMAIN="gui/$(id -u)"
 LEGACY_AGENT_LABELS=(
   "com.nicholas.quickask"
   "com.nicholas.quick-ask"
@@ -94,11 +95,15 @@ for agent_path in "${LEGACY_AGENT_PATHS[@]}"; do
   rm -f "$agent_path"
 done
 
-launchctl bootout "gui/$(id -u)" "$LAUNCH_AGENT" >/dev/null 2>&1 || true
 if [[ "$SKIP_LAUNCH_AGENT" != "1" ]]; then
-  launchctl bootstrap "gui/$(id -u)" "$LAUNCH_AGENT"
-  launchctl kickstart -k "gui/$(id -u)/${BUNDLE_ID}"
+  if launchctl print "${LAUNCH_DOMAIN}/${BUNDLE_ID}" >/dev/null 2>&1; then
+    launchctl kickstart -k "${LAUNCH_DOMAIN}/${BUNDLE_ID}"
+  else
+    launchctl bootstrap "${LAUNCH_DOMAIN}" "$LAUNCH_AGENT"
+    launchctl kickstart -k "${LAUNCH_DOMAIN}/${BUNDLE_ID}"
+  fi
 else
+  launchctl bootout "${LAUNCH_DOMAIN}" "$LAUNCH_AGENT" >/dev/null 2>&1 || true
   echo "Skipped LaunchAgent bootstrap because QUICK_ASK_SKIP_LAUNCH_AGENT=1"
 fi
 

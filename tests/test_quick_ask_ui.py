@@ -543,12 +543,18 @@ class QuickAskUITests(unittest.TestCase):
             resized_top = resized["panelFrame"]["y"] + resized["panelFrame"]["height"]
             self.assertAlmostEqualPx(resized_top, original_top)
 
-    def test_panel_drag_mode_and_history_window_chrome_regression(self) -> None:
+    def test_panel_can_be_dragged_in_new_chat_mode(self) -> None:
         with QuickAskHarness() as app:
             shown = app.command("show_panel")
-            self.assertTrue(shown["panelContentDragEnabled"])
-            self.assertFalse(shown["panelBackgroundDragEnabled"])
+            original_x = shown["panelFrame"]["x"]
+            original_y = shown["panelFrame"]["y"]
 
+            dragged = app.command("drag_panel", text="48|24")
+            self.assertGreater(dragged["panelFrame"]["x"], original_x + 20)
+            self.assertGreater(dragged["panelFrame"]["y"], original_y + 8)
+
+    def test_history_window_chrome_regression(self) -> None:
+        with QuickAskHarness() as app:
             history = app.command("shortcut", shortcut="cmd_shift_backslash")
             self.assertTrue(history["historyWindowVisible"])
             self.assertFalse(history["historyWindowHasTitleBar"])
