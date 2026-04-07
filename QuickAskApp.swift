@@ -220,6 +220,8 @@ struct QuickAskLoadedSession: Codable {
     let model: String
     let modelID: String
     let codexThreadID: String?
+    let scopeMode: String?
+    let scopePath: String?
     let messages: [QuickAskTranscriptMessage]
 
     enum CodingKeys: String, CodingKey {
@@ -229,6 +231,8 @@ struct QuickAskLoadedSession: Codable {
         case model
         case modelID = "model_id"
         case codexThreadID = "codex_thread_id"
+        case scopeMode = "scope_mode"
+        case scopePath = "scope_path"
         case messages
     }
 }
@@ -301,6 +305,11 @@ private func quickAskUserDefaults() -> UserDefaults {
         return defaults
     }
     return .standard
+}
+
+enum QuickAskCodingScopeMode: String {
+    case fullAccess = "full_access"
+    case restricted = "restricted"
 }
 
 @MainActor
@@ -587,11 +596,15 @@ private struct QuickAskUITestState: Codable {
     let copyIndicatorVisible: Bool
     let queuedCount: Int
     let queuedPromptContents: [String]
+    let lastEventMessage: String
     let isGenerating: Bool
     let focusRequestCount: Int
     let frontmostAppName: String
     let selectedModel: String
     let visibleModelIDs: [String]
+    let codingScopeVisible: Bool
+    let codingScopeMode: String
+    let codingScopePath: String
     let inputText: String
     let statusText: String
     let retryAvailable: Bool
@@ -637,6 +650,8 @@ final class QuickAskViewModel: ObservableObject {
     @Published var manualExtraHistoryHeight: CGFloat = 0
     @Published var models: [ModelOption] = []
     @Published var selectedModelID = "claude::claude-opus-4-6"
+    @Published private(set) var codingScopeMode: QuickAskCodingScopeMode = .fullAccess
+    @Published private(set) var codingScopePath: String = NSHomeDirectory().appending("/Downloads")
     @Published var isGenerating = false
     @Published var focusToken = UUID()
     @Published private(set) var focusRequestCount = 0
@@ -650,7 +665,8 @@ final class QuickAskViewModel: ObservableObject {
     private let availableModelsObserver: ([ModelOption]) -> Void
     private let defaults: UserDefaults
     private let lastModelKey = "QuickAskSelectedModelID"
-    private let idleTimeout: TimeInterval = 45
+    private let codingScopeModeKey = "QuickAskCodingScopeMode"
+    private let codingScopePathKey = "QuickAskCodingScopePath"
     private let uiTestMode = ProcessInfo.processInfo.environment["QUICK_ASK_UI_TEST_MODE"] == "1"
     private var lastInteractionAt = Date()
     private var panelDismissedAt: Date?
@@ -688,6 +704,17 @@ final class QuickAskViewModel: ObservableObject {
         if let storedModel = defaults.string(forKey: lastModelKey), !storedModel.isEmpty {
             selectedModelID = storedModel
         }
+        if let storedMode = defaults.string(forKey: codingScopeModeKey),
+           let mode = QuickAskCodingScopeMode(rawValue: storedMode) {
+            codingScopeMode = mode
+        } else {
+            codingScopeMode = .fullAccess
+        }
+        if let storedPath = defaults.string(forKey: codingScopePathKey), !storedPath.isEmpty {
+            codingScopePath = storedPath
+        } else {
+            codingScopePath = QuickAskViewModel.defaultCodingScopePath().path
+        }
     }
 
     deinit {
@@ -719,7 +746,8 @@ final class QuickAskViewModel: ObservableObject {
     func panelHidden() {
         touch()
         panelDismissedAt = Date()
-        scheduleDismissedReset()
+        pendingDismissResetWorkItem?.cancel()
+        pendingDismissResetWorkItem = nil
         QuickAskLog.shared.write("panel hidden")
         saveTranscript()
     }
@@ -866,6 +894,65 @@ final class QuickAskViewModel: ObservableObject {
         touch()
     }
 
+    var isCodingModelSelected: Bool {
+        let provider = selectedModelID.components(separatedBy: "::").first ?? ""
+        return provider == "codex" || provider == "gemini"
+    }
+
+    var codingScopeMenuTitle: String {
+        let expanded = NSString(string: codingScopePath).expandingTildeInPath
+        let path = expanded.isEmpty ? QuickAskViewModel.defaultCodingScopePath().path : expanded
+        let home = NSHomeDirectory()
+        if path.hasPrefix(home) {
+            let suffix = String(path.dropFirst(home.count))
+            return suffix.isEmpty ? "~/" : "~\(suffix)"
+        }
+        return path
+    }
+
+    func setCodingScopeFullAccess() {
+        codingScopeMode = .fullAccess
+        defaults.set(codingScopeMode.rawValue, forKey: codingScopeModeKey)
+        touch()
+    }
+
+    func setCodingScopePathForTesting(_ path: String) {
+        let normalized = normalizedScopePath(from: path)
+        codingScopePath = normalized
+        codingScopeMode = .restricted
+        defaults.set(codingScopePath, forKey: codingScopePathKey)
+        defaults.set(codingScopeMode.rawValue, forKey: codingScopeModeKey)
+        touch()
+    }
+
+    func chooseCodingScopeDirectory() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "Use Scope"
+        panel.message = "Choose a folder for restricted coding scope."
+        panel.directoryURL = URL(fileURLWithPath: normalizedScopePath(from: codingScopePath))
+        if panel.runModal() == .OK, let url = panel.url {
+            let normalized = normalizedScopePath(from: url.path)
+            codingScopePath = normalized
+            defaults.set(codingScopePath, forKey: codingScopePathKey)
+        }
+        codingScopeMode = .restricted
+        defaults.set(codingScopeMode.rawValue, forKey: codingScopeModeKey)
+        touch()
+    }
+
+    private func normalizedScopePath(from rawPath: String) -> String {
+        let expanded = NSString(string: rawPath).expandingTildeInPath
+        let trimmed = expanded.trimmingCharacters(in: .whitespacesAndNewlines)
+        if trimmed.isEmpty {
+            return QuickAskViewModel.defaultCodingScopePath().path
+        }
+        return URL(fileURLWithPath: trimmed).standardizedFileURL.path
+    }
+
     func cycleModel(by offset: Int) {
         guard !models.isEmpty else { return }
         let currentIndex = models.firstIndex(where: { $0.id == selectedModelID }) ?? 0
@@ -936,6 +1023,14 @@ final class QuickAskViewModel: ObservableObject {
         sessionID = session.sessionID
         sessionCreatedAt = session.createdAt
         codexThreadID = session.codexThreadID
+        if let scopeMode = session.scopeMode, let parsed = QuickAskCodingScopeMode(rawValue: scopeMode) {
+            codingScopeMode = parsed
+            defaults.set(parsed.rawValue, forKey: codingScopeModeKey)
+        }
+        if let scopePath = session.scopePath, !scopePath.isEmpty {
+            codingScopePath = normalizedScopePath(from: scopePath)
+            defaults.set(codingScopePath, forKey: codingScopePathKey)
+        }
         statusText = ""
         inputText = ""
         pendingAttachments = []
@@ -1061,6 +1156,12 @@ final class QuickAskViewModel: ObservableObject {
         pendingSteerPromptID = nil
         queuedPrompts = []
         layoutDelegate?.quickAskNeedsLayout()
+    }
+
+    func cancelCurrentGeneration() {
+        touch()
+        guard isGenerating else { return }
+        cancelActiveGeneration()
     }
 
     func persistCurrentTranscript() {
@@ -1208,6 +1309,8 @@ final class QuickAskViewModel: ObservableObject {
             var chatPayload: [String: Any] = [
                 "history": historyPayload,
                 "session_id": sessionID,
+                "scope_mode": codingScopeMode.rawValue,
+                "scope_path": codingScopePath,
             ]
             if let codexThreadID, !codexThreadID.isEmpty {
                 chatPayload["codex_thread_id"] = codexThreadID
@@ -1476,6 +1579,8 @@ final class QuickAskViewModel: ObservableObject {
         let sessionCreatedAt = self.sessionCreatedAt
         let modelID = self.selectedModelID
         let codexThreadID = self.codexThreadID
+        let scopeMode = self.codingScopeMode.rawValue
+        let scopePath = self.codingScopePath
         let processEnvironment = self.processEnvironmentProvider()
 
         saveQueue.async {
@@ -1505,6 +1610,8 @@ final class QuickAskViewModel: ObservableObject {
                 if let codexThreadID, !codexThreadID.isEmpty {
                     savePayload["codex_thread_id"] = codexThreadID
                 }
+                savePayload["scope_mode"] = scopeMode
+                savePayload["scope_path"] = scopePath
                 if let data = try? JSONSerialization.data(withJSONObject: savePayload) {
                     stdin.fileHandleForWriting.write(data)
                 }
@@ -1522,23 +1629,17 @@ final class QuickAskViewModel: ObservableObject {
         return formatter.string(from: date)
     }
 
+    private static func defaultCodingScopePath() -> URL {
+        let downloads = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Downloads", isDirectory: true)
+        if FileManager.default.fileExists(atPath: downloads.path) {
+            return downloads
+        }
+        return FileManager.default.homeDirectoryForCurrentUser
+    }
+
     private func scheduleDismissedReset() {
         pendingDismissResetWorkItem?.cancel()
-        let workItem = DispatchWorkItem { [weak self] in
-            Task { @MainActor in
-                guard let self else { return }
-                guard self.panelDismissedAt != nil else { return }
-                guard !self.isGenerating else {
-                    self.scheduleDismissedReset()
-                    return
-                }
-                if !self.messages.isEmpty || !self.inputText.isEmpty {
-                    self.clearHistory()
-                }
-            }
-        }
-        pendingDismissResetWorkItem = workItem
-        DispatchQueue.main.asyncAfter(deadline: .now() + idleTimeout, execute: workItem)
+        pendingDismissResetWorkItem = nil
     }
 
     func forceIdleTimeoutElapsedForTesting(panelIsVisible: Bool) {
@@ -1547,12 +1648,9 @@ final class QuickAskViewModel: ObservableObject {
             pendingDismissResetWorkItem?.cancel()
             pendingDismissResetWorkItem = nil
         } else {
-            panelDismissedAt = Date().addingTimeInterval(-(idleTimeout + 1))
+            panelDismissedAt = Date()
             pendingDismissResetWorkItem?.cancel()
             pendingDismissResetWorkItem = nil
-            if !messages.isEmpty || !inputText.isEmpty {
-                clearHistory()
-            }
         }
     }
 }
@@ -2111,6 +2209,12 @@ struct QuickAskSettingsView: View {
                                 .font(.system(size: 11, weight: .regular))
                                 .foregroundStyle(QuickAskTheme.mutedText)
                                 .fixedSize(horizontal: false, vertical: true)
+                            if provider.id == "ollama" {
+                                Text("Add local models: `ollama pull <model>`")
+                                    .font(.system(size: 11, weight: .regular))
+                                    .foregroundStyle(QuickAskTheme.mutedText)
+                                    .fixedSize(horizontal: false, vertical: true)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                         if provider.id != settings.providerStatuses.last?.id {
@@ -3268,6 +3372,20 @@ struct QuickAskView: View {
                             }
                         }
                         Divider()
+                        if viewModel.isCodingModelSelected {
+                            Text("scope")
+                            Button {
+                                viewModel.setCodingScopeFullAccess()
+                            } label: {
+                                Text("\(viewModel.codingScopeMode == .fullAccess ? "✓ " : "")Full Access")
+                            }
+                            Button {
+                                viewModel.chooseCodingScopeDirectory()
+                            } label: {
+                                Text("\(viewModel.codingScopeMode == .restricted ? "✓ " : "")\(viewModel.codingScopeMenuTitle)…")
+                            }
+                            Divider()
+                        }
                         Button {
                             onOpenHistory()
                         } label: {
@@ -3697,6 +3815,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                     self.restoreSession(session)
                     return nil
                 }
+            }
+            if let keyPanelContext,
+               flags.isEmpty,
+               event.keyCode == UInt16(kVK_Escape),
+               keyPanelContext.viewModel.isGenerating {
+                keyPanelContext.viewModel.cancelCurrentGeneration()
+                return nil
             }
             if flags == [.command],
                event.charactersIgnoringModifiers?.lowercased() == "w" {
@@ -4592,11 +4717,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             copyIndicatorVisible: viewModel?.copiedMessageID != nil,
             queuedCount: viewModel?.queuedPrompts.count ?? 0,
             queuedPromptContents: viewModel?.queuedPrompts.map(\.content) ?? [],
+            lastEventMessage: viewModel?.messages.last(where: { $0.role == .event })?.content ?? "",
             isGenerating: viewModel?.isGenerating ?? false,
             focusRequestCount: viewModel?.focusRequestCount ?? 0,
             frontmostAppName: frontmostAppName,
             selectedModel: selectedModel,
             visibleModelIDs: visibleModelIDs,
+            codingScopeVisible: viewModel?.isCodingModelSelected ?? false,
+            codingScopeMode: viewModel?.codingScopeMode.rawValue ?? QuickAskCodingScopeMode.fullAccess.rawValue,
+            codingScopePath: viewModel?.codingScopePath ?? "",
             inputText: viewModel?.inputText ?? "",
             statusText: viewModel?.statusText ?? "",
             retryAvailable: viewModel?.canRetryLastFailure ?? false,
@@ -4683,6 +4812,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
             if let text = command.text, !text.isEmpty {
                 activeContext.viewModel.selectModel(text)
             }
+        case "set_scope_full":
+            activeContext.viewModel.setCodingScopeFullAccess()
+        case "set_scope_path":
+            if let text = command.text, !text.isEmpty {
+                activeContext.viewModel.setCodingScopePathForTesting(text)
+            }
         case "clear_archive_dir":
             clearArchiveDirectory()
         case "delete_history_session":
@@ -4747,6 +4882,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, QuickAskLayoutDelegate
                 toggleHistoryWindow()
             case "cmd_backslash":
                 togglePanel()
+            case "esc":
+                activeContext.viewModel.cancelCurrentGeneration()
             default:
                 break
             }

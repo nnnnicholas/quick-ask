@@ -6,18 +6,21 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import datetime as dt
 import functools
 import http.client
 import json
 import os
 import pathlib
 import re
+import select
 import shlex
 import shutil
 import socket
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any
 
 ROOT = pathlib.Path(__file__).resolve().parent
@@ -216,10 +219,10 @@ def list_available_models() -> list[dict[str, Any]]:
     }
 
     models: list[dict[str, Any]] = []
+    if "codex" in enabled_providers:
+        models.extend(codex_models_for_system())
     if "claude" in enabled_providers:
         models.extend(dict(model) for model in CLAUDE_MODELS)
-    if "codex" in enabled_providers:
-        models.extend(dict(model) for model in CODEX_MODELS)
     if "gemini" in enabled_providers:
         models.extend(dict(model) for model in GEMINI_MODELS)
     try:
@@ -245,7 +248,176 @@ def list_available_models() -> list[dict[str, Any]]:
                 "default": False,
             }
         )
-    return models
+    return sort_models_by_usage(models)
+
+
+def parse_iso_datetime(value: str) -> dt.datetime | None:
+    text = (value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = dt.datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=dt.timezone.utc)
+    return parsed.astimezone(dt.timezone.utc)
+
+
+def model_usage_scores() -> dict[str, float]:
+    if history_disabled():
+        return {}
+
+    now = dt.datetime.now(dt.timezone.utc)
+    base_dir = shared.default_save_dir()
+    scores: dict[str, float] = {}
+    most_recent_model_id = ""
+    most_recent_ts: dt.datetime | None = None
+
+    for path in base_dir.glob("*.enc.json"):
+        try:
+            payload = shared.load_payload_from_path(path)
+        except Exception:
+            continue
+        if str(payload.get("source") or "").strip() not in {"quick-ask", "quick_ask"}:
+            continue
+
+        model_id = str(payload.get("model_id") or "").strip()
+        if not model_id:
+            continue
+
+        when = parse_iso_datetime(str(payload.get("saved_at") or payload.get("created_at") or ""))
+        if when is None:
+            when = now
+        age_hours = max(0.0, (now - when).total_seconds() / 3600.0)
+        # Heavily weight the last 72h so ranking reacts quickly.
+        weight = 6.0 if age_hours <= 72 else 1.0
+        scores[model_id] = scores.get(model_id, 0.0) + weight
+
+        if most_recent_ts is None or when > most_recent_ts:
+            most_recent_ts = when
+            most_recent_model_id = model_id
+
+    if most_recent_model_id:
+        # Small tie-break bonus for the most recently used model.
+        scores[most_recent_model_id] = scores.get(most_recent_model_id, 0.0) + 0.5
+    return scores
+
+
+def sort_models_by_usage(models: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    if not models:
+        return models
+
+    provider_rank = {"codex": 0, "claude": 1, "gemini": 2, "ollama": 3}
+    usage = model_usage_scores()
+    indexed = list(enumerate(models))
+    indexed.sort(
+        key=lambda item: (
+            provider_rank.get(str(item[1].get("provider") or ""), 99),
+            -usage.get(str(item[1].get("id") or ""), 0.0),
+            item[0],
+        )
+    )
+    return [model for _index, model in indexed]
+
+
+def codex_app_server_available_model_ids(timeout_seconds: float = 3.0) -> set[str]:
+    codex_path = command_path("codex")
+    if not codex_path:
+        return set()
+
+    proc: subprocess.Popen[str] | None = None
+    try:
+        proc = subprocess.Popen(
+            [codex_path, "app-server", "--listen", "stdio://"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            bufsize=1,
+            env=provider_runtime_env("codex"),
+        )
+        if proc.stdin is None or proc.stdout is None:
+            return set()
+
+        initialize = {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2026-02-01",
+                "clientInfo": {"name": "quick-ask-model-probe", "version": "1.0"},
+                "capabilities": {},
+            },
+        }
+        model_list = {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "model/list",
+            "params": {"includeHidden": False},
+        }
+        proc.stdin.write(json.dumps(initialize) + "\n")
+        proc.stdin.write(json.dumps(model_list) + "\n")
+        proc.stdin.flush()
+
+        deadline = time.monotonic() + timeout_seconds
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([proc.stdout], [], [], 0.15)
+            if not ready:
+                continue
+            line = proc.stdout.readline()
+            if not line:
+                break
+            line = line.strip()
+            if not line or not line.startswith("{"):
+                continue
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if payload.get("id") != 2:
+                continue
+            result = payload.get("result")
+            if not isinstance(result, dict):
+                return set()
+            records = result.get("data")
+            if not isinstance(records, list):
+                return set()
+            ids: set[str] = set()
+            for record in records:
+                if not isinstance(record, dict):
+                    continue
+                model_id = str(record.get("model") or record.get("id") or "").strip()
+                if model_id:
+                    ids.add(model_id)
+            return ids
+    except Exception:
+        return set()
+    finally:
+        if proc is not None:
+            with contextlib.suppress(Exception):
+                proc.terminate()
+            with contextlib.suppress(Exception):
+                proc.wait(timeout=0.5)
+
+    return set()
+
+
+def codex_models_for_system() -> list[dict[str, Any]]:
+    available = codex_app_server_available_model_ids()
+    if not available:
+        return []
+
+    filtered: list[dict[str, Any]] = []
+    for option in CODEX_MODELS:
+        model_name = str(option.get("model") or "").strip()
+        if model_name and model_name not in available:
+            continue
+        filtered.append(dict(option))
+
+    return filtered
 
 
 def command_path(name: str) -> str | None:
@@ -965,7 +1137,9 @@ def codex_start_thread(
     request_id: int,
     model: str,
     cwd: pathlib.Path,
+    scope_mode: str,
 ) -> int:
+    sandbox_mode = "danger-full-access" if scope_mode == "full_access" else "workspace-write"
     codex_send_jsonrpc(
         stdin,
         codex_jsonrpc_request(
@@ -973,7 +1147,7 @@ def codex_start_thread(
             "thread/start",
             {
                 "approvalPolicy": "never",
-                "sandbox": "danger-full-access",
+                "sandbox": sandbox_mode,
                 "cwd": str(cwd),
                 "model": model,
             },
@@ -990,15 +1164,25 @@ def codex_start_turn(
     user_input: list[dict[str, str]],
     cwd: pathlib.Path,
     effort: str | None,
+    scope_mode: str,
 ) -> int:
+    sandbox_policy: dict[str, Any]
+    if scope_mode == "restricted":
+        sandbox_policy = {
+            "type": "workspaceWrite",
+            "writableRoots": [str(cwd)],
+            "networkAccess": True,
+        }
+    else:
+        sandbox_policy = {"type": "dangerFullAccess"}
+
     params: dict[str, Any] = {
         "threadId": thread_id,
         "input": user_input,
         "model": model,
         "cwd": str(cwd),
         "approvalPolicy": "never",
-        # Force full access even on resumed threads that may carry older sandbox settings.
-        "sandboxPolicy": {"type": "dangerFullAccess"},
+        "sandboxPolicy": sandbox_policy,
     }
     if effort:
         params["effort"] = effort
@@ -1050,7 +1234,8 @@ def stream_codex_app_server(model_id: str, history: list[HistoryMessage], contex
     session_id = str(context.get("session_id") or "").strip()
     requested_thread_id = str(context.get("codex_thread_id") or "").strip()
 
-    cwd = DEFAULT_CODEX_APP_SERVER_CWD
+    scope_mode, scoped_cwd = scope_from_context(context)
+    cwd = scoped_cwd if scoped_cwd.exists() else (pathlib.Path.home() / "Downloads")
     if not cwd.exists():
         cwd = pathlib.Path.home()
 
@@ -1098,7 +1283,7 @@ def stream_codex_app_server(model_id: str, history: list[HistoryMessage], contex
             request_id = codex_try_resume_thread(proc.stdin, request_id, thread_id)
         else:
             pending[request_id] = "thread/start"
-            request_id = codex_start_thread(proc.stdin, request_id, model, cwd)
+            request_id = codex_start_thread(proc.stdin, request_id, model, cwd, scope_mode)
 
         while True:
             raw_line = proc.stdout.readline()
@@ -1121,7 +1306,7 @@ def stream_codex_app_server(model_id: str, history: list[HistoryMessage], contex
                     if response_kind == "thread/resume":
                         thread_id = ""
                         pending[request_id] = "thread/start"
-                        request_id = codex_start_thread(proc.stdin, request_id, model, cwd)
+                        request_id = codex_start_thread(proc.stdin, request_id, model, cwd, scope_mode)
                         continue
                     message = str((payload.get("error") or {}).get("message") or "Codex app server request failed.").strip()
                     emit({"type": "error", "message": message})
@@ -1156,6 +1341,7 @@ def stream_codex_app_server(model_id: str, history: list[HistoryMessage], contex
                             codex_build_turn_input(history, attachment_dir=attachment_dir),
                             cwd,
                             effort,
+                            scope_mode,
                         )
                         started_turn = True
                     continue
@@ -1245,6 +1431,23 @@ def codex_model_option(model_id: str) -> dict[str, Any] | None:
     return next((option for option in CODEX_MODELS if str(option.get("id")) == model_id), None)
 
 
+def scope_from_context(context: dict[str, Any]) -> tuple[str, pathlib.Path]:
+    requested_mode = str(context.get("scope_mode") or "").strip().lower()
+    requested_path = str(context.get("scope_path") or "").strip()
+
+    downloads = pathlib.Path.home() / "Downloads"
+    fallback = downloads if downloads.exists() else pathlib.Path.home()
+
+    if requested_mode == "restricted":
+        if requested_path:
+            candidate = pathlib.Path(os.path.expanduser(requested_path)).resolve()
+            if candidate.exists() and candidate.is_dir():
+                return "restricted", candidate
+        return "restricted", fallback
+
+    return "full_access", fallback
+
+
 def attachment_file_suffix(attachment: dict[str, str]) -> str:
     filename = attachment.get("filename") or ""
     suffix = pathlib.Path(filename).suffix
@@ -1266,6 +1469,8 @@ def materialize_attachment_files(history: list[HistoryMessage], target_dir: path
 def codex_shell_invocation(
     model_id: str,
     history: list[HistoryMessage],
+    scope_mode: str,
+    scope_cwd: pathlib.Path,
     attachment_dir: pathlib.Path | None = None,
 ) -> tuple[list[str], pathlib.Path]:
     prompt = build_remote_cli_prompt(history)
@@ -1275,16 +1480,17 @@ def codex_shell_invocation(
     option = codex_model_option(model_id)
     model = str(option.get("model")) if option is not None else model_id
     effort = str(option.get("effort")) if option is not None and option.get("effort") else ""
-    SAFE_CWD.mkdir(parents=True, exist_ok=True)
+    scope_cwd.mkdir(parents=True, exist_ok=True)
+    sandbox_mode = "danger-full-access" if scope_mode == "full_access" else "workspace-write"
     argv = [
         codex_path,
         "exec",
         "--json",
         "--skip-git-repo-check",
         "-C",
-        str(SAFE_CWD),
+        str(scope_cwd),
         "-s",
-        "read-only",
+        sandbox_mode,
         "-m",
         model,
         prompt,
@@ -1294,7 +1500,7 @@ def codex_shell_invocation(
     if attachment_dir is not None:
         for path in materialize_attachment_files(history, attachment_dir):
             argv.extend(["-i", str(path)])
-    return argv, SAFE_CWD
+    return argv, scope_cwd
 
 
 def stream_codex(model_id: str, history: list[HistoryMessage], context: dict[str, Any]) -> int:
@@ -1303,6 +1509,7 @@ def stream_codex(model_id: str, history: list[HistoryMessage], context: dict[str
 
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     proc: subprocess.Popen[str] | None = None
+    scope_mode, scope_cwd = scope_from_context(context)
     SAFE_CWD.mkdir(parents=True, exist_ok=True)
     try:
         attachment_dir = None
@@ -1310,7 +1517,13 @@ def stream_codex(model_id: str, history: list[HistoryMessage], context: dict[str
             temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-codex-images-", dir=SAFE_CWD)
             attachment_dir = pathlib.Path(temp_dir.name)
 
-        command, safe_cwd = codex_shell_invocation(model_id, history, attachment_dir=attachment_dir)
+        command, safe_cwd = codex_shell_invocation(
+            model_id,
+            history,
+            scope_mode=scope_mode,
+            scope_cwd=scope_cwd,
+            attachment_dir=attachment_dir,
+        )
         proc = subprocess.Popen(
             command,
             cwd=str(safe_cwd),
@@ -1372,9 +1585,11 @@ def stream_codex(model_id: str, history: list[HistoryMessage], context: dict[str
 def gemini_shell_invocation(
     model: str,
     history: list[HistoryMessage],
+    scope_mode: str,
+    scope_cwd: pathlib.Path,
     attachment_dir: pathlib.Path | None = None,
 ) -> tuple[list[str], pathlib.Path]:
-    gemini_cwd = DEFAULT_GEMINI_CWD
+    gemini_cwd = scope_cwd if scope_cwd.exists() else DEFAULT_GEMINI_CWD
     if not gemini_cwd.exists():
         gemini_cwd = pathlib.Path.home()
 
@@ -1404,16 +1619,17 @@ def gemini_shell_invocation(
         "--approval-mode",
         "yolo",
         "--include-directories",
-        str(pathlib.Path.home()),
+        str(pathlib.Path.home() if scope_mode == "full_access" else gemini_cwd),
     ]
     if model:
         argv.extend(["--model", model])
     return argv, gemini_cwd
 
 
-def stream_gemini(model: str, history: list[HistoryMessage]) -> int:
+def stream_gemini(model: str, history: list[HistoryMessage], context: dict[str, Any]) -> int:
     temp_dir: tempfile.TemporaryDirectory[str] | None = None
     proc: subprocess.Popen[str] | None = None
+    scope_mode, scope_cwd = scope_from_context(context)
     SAFE_CWD.mkdir(parents=True, exist_ok=True)
     try:
         attachment_dir = None
@@ -1421,7 +1637,13 @@ def stream_gemini(model: str, history: list[HistoryMessage]) -> int:
             temp_dir = tempfile.TemporaryDirectory(prefix="quick-ask-gemini-images-", dir=SAFE_CWD)
             attachment_dir = pathlib.Path(temp_dir.name)
 
-        command, safe_cwd = gemini_shell_invocation(model, history, attachment_dir=attachment_dir)
+        command, safe_cwd = gemini_shell_invocation(
+            model,
+            history,
+            scope_mode=scope_mode,
+            scope_cwd=scope_cwd,
+            attachment_dir=attachment_dir,
+        )
         proc = subprocess.Popen(
             command,
             cwd=str(safe_cwd),
@@ -1459,6 +1681,12 @@ def stream_gemini(model: str, history: list[HistoryMessage]) -> int:
                         error_message = error_payload.get("message")
                     if not isinstance(error_message, str) or not error_message.strip():
                         error_message = "Gemini request failed."
+                    normalized = error_message.lower()
+                    if "mime_type" in normalized and "audio/mpeg" in normalized and "function_response.parts" in normalized:
+                        error_message = (
+                            "Gemini could not process tool output for this audio/video task in this mode. "
+                            "Try Codex 5.3 for local transcription, or convert the file to text first."
+                        )
                     emit({"type": "error", "message": error_message})
                     return 1
                 emit({"type": "done"})
@@ -1592,6 +1820,12 @@ def read_chat_request_from_stdin() -> tuple[list[HistoryMessage], dict[str, Any]
         codex_thread_id = str(payload.get("codex_thread_id") or "").strip()
         if codex_thread_id:
             context["codex_thread_id"] = codex_thread_id
+        scope_mode = str(payload.get("scope_mode") or "").strip()
+        if scope_mode:
+            context["scope_mode"] = scope_mode
+        scope_path = str(payload.get("scope_path") or "").strip()
+        if scope_path:
+            context["scope_path"] = scope_path
     else:
         history = payload
     if not isinstance(history, list):
@@ -1712,7 +1946,7 @@ def handle_chat(model_id: str) -> int:
     if provider == "codex":
         return stream_codex(model_id, history, context)
     if provider == "gemini":
-        return stream_gemini(model, history)
+        return stream_gemini(model, history, context)
     if provider == "ollama":
         return stream_ollama(model, history)
 
@@ -1798,6 +2032,12 @@ def handle_save(session_id: str, created_at: str, model_id: str) -> int:
     codex_thread_id = str(context.get("codex_thread_id") or "").strip()
     if codex_thread_id and model_id.startswith("codex::"):
         payload["codex_thread_id"] = codex_thread_id
+    scope_mode = str(context.get("scope_mode") or "").strip().lower()
+    if scope_mode in {"full_access", "restricted"}:
+        payload["scope_mode"] = scope_mode
+    scope_path = str(context.get("scope_path") or "").strip()
+    if scope_path:
+        payload["scope_path"] = scope_path
     store = shared.SessionStore(shared.default_save_dir(), session_id=session_id)
     store.save(payload)
     emit({"type": "saved", "path": str(store.path)})

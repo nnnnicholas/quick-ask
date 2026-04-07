@@ -312,6 +312,35 @@ class QuickAskUITests(unittest.TestCase):
             self.assertFalse(done["isGenerating"])
             self.assertEqual(done["queuedCount"], 0)
 
+    def test_generation_continues_when_panel_is_hidden(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="long running task")
+            in_flight = app.command("submit")
+            self.assertTrue(in_flight["isGenerating"])
+
+            hidden = app.command("hide_panel")
+            self.assertFalse(hidden["panelVisible"])
+            self.assertTrue(hidden["isGenerating"])
+
+            completed = app.command("complete_generation", text="finished in background")
+            self.assertFalse(completed["isGenerating"])
+            self.assertFalse(completed["panelVisible"])
+
+            shown = app.command("show_panel")
+            self.assertTrue(shown["panelVisible"])
+            self.assertGreaterEqual(shown["messageCount"], 2)
+
+    def test_escape_shortcut_cancels_active_generation(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("set_input", text="run something")
+            in_flight = app.command("submit")
+            self.assertTrue(in_flight["isGenerating"])
+
+            canceled = app.command("shortcut", shortcut="esc")
+            self.assertFalse(canceled["isGenerating"])
+
     def test_cmd_enter_steers_current_input_ahead_of_existing_queue(self) -> None:
         with QuickAskHarness() as app:
             app.command("show_panel")
@@ -676,10 +705,35 @@ class QuickAskUITests(unittest.TestCase):
             previous = app.command("shortcut", shortcut="ctrl_shift_tab")
             self.assertEqual(previous["selectedModel"], "Gemini 3 Flash")
 
+    def test_scope_section_visibility_follows_selected_model(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.wait_for(lambda current: len(current["visibleModelIDs"]) >= 4, timeout=8.0)
+
+            claude = app.command("select_model", text="claude::claude-opus-4-6")
+            self.assertFalse(claude["codingScopeVisible"])
+
+            codex = app.command("select_model", text="codex::gpt-5.3-app-server")
+            self.assertTrue(codex["codingScopeVisible"])
+            self.assertEqual(codex["codingScopeMode"], "full_access")
+            self.assertIn("/Downloads", codex["codingScopePath"])
+
+    def test_scope_can_switch_between_restricted_and_full_access(self) -> None:
+        with QuickAskHarness() as app:
+            app.command("show_panel")
+            app.command("select_model", text="codex::gpt-5.3-app-server")
+            restricted = app.command("set_scope_path", text="/tmp")
+            self.assertEqual(restricted["codingScopeMode"], "restricted")
+            self.assertTrue(restricted["codingScopePath"].endswith("/tmp"))
+
+            full = app.command("set_scope_full")
+            self.assertEqual(full["codingScopeMode"], "full_access")
+
     def test_switching_models_preserves_history_and_updates_next_turn_selection(self) -> None:
         with QuickAskHarness() as app:
             app.command("show_panel")
             app.wait_for(lambda current: "codex::gpt-5.4-instant" in current["visibleModelIDs"], timeout=8.0)
+            app.command("select_model", text="codex::gpt-5.4-instant")
 
             app.command("set_input", text="first prompt")
             app.command("submit")
@@ -687,13 +741,17 @@ class QuickAskUITests(unittest.TestCase):
 
             switched = app.command("select_model", text="codex::gpt-5.4-medium")
             self.assertEqual(switched["selectedModel"], "ChatGPT 5.4 Medium")
-            self.assertEqual(switched["messageCount"], 2)
+            self.assertEqual(switched["messageCount"], 3)
+            self.assertEqual(
+                switched["lastEventMessage"],
+                "Changed model: ChatGPT 5.4 Instant -> ChatGPT 5.4 Medium",
+            )
 
             app.command("set_input", text="second prompt")
             in_flight = app.command("submit")
             self.assertTrue(in_flight["isGenerating"])
             self.assertEqual(in_flight["selectedModel"], "ChatGPT 5.4 Medium")
-            self.assertEqual(in_flight["messageCount"], 4)
+            self.assertEqual(in_flight["messageCount"], 5)
 
     def test_offline_defaults_to_best_visible_ollama_model(self) -> None:
         with QuickAskHarness(extra_env={"QUICK_ASK_UI_TEST_NETWORK_ONLINE": "0"}) as app:

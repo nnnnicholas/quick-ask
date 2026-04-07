@@ -100,12 +100,29 @@ class BackendImageSupportTests(unittest.TestCase):
                 argv, _safe_cwd = backend.codex_shell_invocation(
                     "gpt-5.4",
                     history,
+                    scope_mode="full_access",
+                    scope_cwd=Path(temp_dir),
                     attachment_dir=Path(temp_dir),
                 )
                 image_flag_index = argv.index("-i")
                 image_path = Path(argv[image_flag_index + 1])
                 self.assertTrue(image_path.exists())
                 self.assertEqual(image_path.read_bytes(), b"chart-bytes")
+                self.assertEqual(argv[argv.index("-s") + 1], "danger-full-access")
+
+    def test_codex_shell_invocation_restricted_scope_uses_workspace_write(self) -> None:
+        history = [{"role": "user", "content": "list files"}]
+        with tempfile.TemporaryDirectory(prefix="quick-ask-codex-scope-test-") as temp_dir:
+            with mock.patch.object(backend, "command_path", return_value="/opt/homebrew/bin/codex"):
+                argv, safe_cwd = backend.codex_shell_invocation(
+                    "codex::gpt-5.4-medium",
+                    history,
+                    scope_mode="restricted",
+                    scope_cwd=Path(temp_dir),
+                )
+        self.assertEqual(Path(argv[argv.index("-C") + 1]), Path(temp_dir))
+        self.assertEqual(Path(safe_cwd), Path(temp_dir))
+        self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
 
     def test_claude_shell_invocation_allows_read_for_attachment_files(self) -> None:
         history = [
@@ -149,6 +166,8 @@ class BackendImageSupportTests(unittest.TestCase):
                     argv, _safe_cwd = backend.gemini_shell_invocation(
                         "gemini-2.5-flash-lite",
                         history,
+                        scope_mode="restricted",
+                        scope_cwd=safe_cwd,
                         attachment_dir=attachment_dir,
                     )
 
@@ -156,6 +175,28 @@ class BackendImageSupportTests(unittest.TestCase):
                     self.assertIn("@attachments/001-chart.png", prompt)
                     self.assertTrue((attachment_dir / "001-chart.png").exists())
                     self.assertEqual((attachment_dir / "001-chart.png").read_bytes(), b"chart-bytes")
+
+    def test_gemini_shell_invocation_honors_scope_include_directories(self) -> None:
+        history = [{"role": "user", "content": "hello"}]
+        with tempfile.TemporaryDirectory(prefix="quick-ask-gemini-scope-test-") as temp_dir:
+            with mock.patch.object(backend, "command_path", return_value="/opt/homebrew/bin/gemini"):
+                restricted_argv, _ = backend.gemini_shell_invocation(
+                    "gemini-2.5-flash-lite",
+                    history,
+                    scope_mode="restricted",
+                    scope_cwd=Path(temp_dir),
+                )
+                full_argv, _ = backend.gemini_shell_invocation(
+                    "gemini-2.5-flash-lite",
+                    history,
+                    scope_mode="full_access",
+                    scope_cwd=Path(temp_dir),
+                )
+
+        restricted_include = restricted_argv[restricted_argv.index("--include-directories") + 1]
+        full_include = full_argv[full_argv.index("--include-directories") + 1]
+        self.assertEqual(restricted_include, temp_dir)
+        self.assertEqual(full_include, str(Path.home()))
 
     def test_handle_chat_routes_image_turns_to_claude(self) -> None:
         history = [
@@ -185,7 +226,7 @@ class BackendImageSupportTests(unittest.TestCase):
                 result = backend.handle_chat("gemini::gemini-3-flash-preview")
 
         self.assertEqual(result, 0)
-        stream_gemini.assert_called_once_with("gemini-3-flash-preview", history)
+        stream_gemini.assert_called_once_with("gemini-3-flash-preview", history, {})
 
 
 if __name__ == "__main__":

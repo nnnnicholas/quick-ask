@@ -6,6 +6,7 @@ from __future__ import annotations
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -23,6 +24,8 @@ class CodexAppServerBackendTests(unittest.TestCase):
             "history": [{"role": "user", "content": "hello"}],
             "session_id": "session-123",
             "codex_thread_id": "thread-abc",
+            "scope_mode": "restricted",
+            "scope_path": "/tmp",
         }
 
         with mock.patch.object(sys, "stdin", io.StringIO(json.dumps(payload))):
@@ -31,6 +34,8 @@ class CodexAppServerBackendTests(unittest.TestCase):
         self.assertEqual(history, [{"role": "user", "content": "hello"}])
         self.assertEqual(context["session_id"], "session-123")
         self.assertEqual(context["codex_thread_id"], "thread-abc")
+        self.assertEqual(context["scope_mode"], "restricted")
+        self.assertEqual(context["scope_path"], "/tmp")
 
     def test_stream_codex_dispatches_to_app_server_runtime(self) -> None:
         history = [{"role": "user", "content": "ping"}]
@@ -76,6 +81,7 @@ class CodexAppServerBackendTests(unittest.TestCase):
                 user_input=[{"type": "text", "text": "hi"}],
                 cwd=Path("/Users/nicholas/Downloads"),
                 effort="medium",
+                scope_mode="full_access",
             )
 
         send_jsonrpc.assert_called_once()
@@ -84,6 +90,50 @@ class CodexAppServerBackendTests(unittest.TestCase):
         params = payload["params"]
         self.assertEqual(params["approvalPolicy"], "never")
         self.assertEqual(params["sandboxPolicy"], {"type": "dangerFullAccess"})
+
+    def test_codex_start_turn_sets_workspace_write_policy_for_restricted_scope(self) -> None:
+        fake_stdin = io.StringIO()
+        with mock.patch.object(backend, "codex_send_jsonrpc") as send_jsonrpc:
+            backend.codex_start_turn(
+                fake_stdin,
+                request_id=8,
+                thread_id="thread-xyz",
+                model="gpt-5.3-codex",
+                user_input=[{"type": "text", "text": "hi"}],
+                cwd=Path("/tmp"),
+                effort="medium",
+                scope_mode="restricted",
+            )
+
+        params = send_jsonrpc.call_args.args[1]["params"]
+        self.assertEqual(
+            params["sandboxPolicy"],
+            {"type": "workspaceWrite", "writableRoots": ["/tmp"], "networkAccess": True},
+        )
+
+    def test_scope_from_context_uses_valid_restricted_directory(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="quick-ask-scope-test-") as temp_dir:
+            mode, cwd = backend.scope_from_context(
+                {
+                    "scope_mode": "restricted",
+                    "scope_path": temp_dir,
+                }
+            )
+        self.assertEqual(mode, "restricted")
+        self.assertEqual(cwd, Path(temp_dir).resolve())
+
+    def test_scope_from_context_falls_back_when_restricted_path_missing(self) -> None:
+        with mock.patch.object(Path, "home", return_value=Path("/Users/example")):
+            with mock.patch.object(Path, "exists", autospec=True) as exists:
+                exists.side_effect = lambda path_obj: str(path_obj) == "/Users/example/Downloads"
+                mode, cwd = backend.scope_from_context(
+                    {
+                        "scope_mode": "restricted",
+                        "scope_path": "/does/not/exist",
+                    }
+                )
+        self.assertEqual(mode, "restricted")
+        self.assertEqual(cwd, Path("/Users/example/Downloads"))
 
 
 if __name__ == "__main__":

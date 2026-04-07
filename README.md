@@ -1,127 +1,176 @@
-# quick-ask
+# Quick Ask
 
-`quick-ask` is the repo for `Quick Ask`, a compact macOS chat panel for short prompts.
+`quick-ask` is a native macOS floating chat app that uses local CLIs (Claude, Codex/ChatGPT, Gemini, Ollama) instead of API key onboarding.
 
-The app lives above your other windows, keeps the input bar pinned while the conversation grows upward, reuses existing CLI logins instead of API keys, and can save transcripts with encrypted-at-rest storage.
+It is built for fast, short interactions:
+
+- always-on-top panel
+- keyboard-first flow
+- queue + steer while a turn is still running
+- encrypted optional history
+- model switching inside one thread
 
 ![Quick Ask screenshot](assets/quick-ask-sample.png)
 
-## What It Does
+## Current Product Behavior
 
-- Toggle a floating panel with `Cmd+\`
-- Open a separate history window with `Cmd+Shift+\`
-- Open history from the model menu without leaving the panel
-- Open a keyboard shortcuts reference from `Settings…`
-- Start a fresh chat with `Cmd+N`
-- Dismiss the focused Quick Ask window with `Cmd+W`
-- Cycle visible models with `Cmd+[ / Cmd+]`
-- Cycle model providers with `Ctrl+Tab / Ctrl+Shift+Tab`
-- Queue prompts while a reply is still streaming
-- Steer to the next queued prompt with `Cmd+Enter`
-- Cancel queued prompts without interrupting the current reply
-- Steer or remove each queued prompt individually
-- Paste images from the clipboard into the composer
-- Restore earlier chats from encrypted saved history
-- Delete saved threads directly from the history window
-- Show a small setup screen only when history is enabled but no archive folder has been chosen yet
-- Pick your own archive folder or disable history entirely
-- Switch between Claude via Claude CLI, ChatGPT instant or medium via Codex CLI, Gemini via Gemini CLI, and installed Ollama models
-- Recheck Claude, Codex, Gemini, and Ollama availability from `Settings…`
-- Hide or re-enable individual available models from `Settings…`
+- Global toggle: `Cmd+\`
+- History window: `Cmd+Shift+\`
+- Settings window: `Cmd+,`
+- New chat: `Cmd+N`
+- New additional panel: `Cmd+Shift+N`
+- Steer current draft ahead of queue: `Cmd+Enter`
+- Model cycle: `Cmd+[ / Cmd+]` or `Ctrl+Tab / Ctrl+Shift+Tab`
+- Cancel active generation: `Esc`
+- Close focused Quick Ask window: `Cmd+W`
+- Paste image attachments into composer: `Cmd+V`
 
-## Requirements
+Chat behavior:
 
-- macOS
-- Python 3
-- Xcode command line tools
-- Any of: Claude CLI, Codex CLI, Gemini CLI, Ollama
-- `openssl` and macOS Keychain access for transcript encryption
+- Replies stream inline in the panel.
+- If a reply is active, new sends are queued.
+- Each queued prompt has per-item `Steer` and cancel actions.
+- Hiding the panel does not stop in-flight generation.
+- The app does not auto-clear conversation history on a timer.
 
-## Storage
+History window behavior:
 
-Transcript saves are encrypted before they are written to disk.
+- First row is auto-selected.
+- Navigation supports Down/Up arrows and `j/k`.
+- `Enter` reopens the selected thread.
+- Delete is available from history UI.
 
-- On first setup, Quick Ask asks whether history should be enabled.
-- If history is enabled, Quick Ask saves into a `Quick Ask/sessions` subfolder inside the folder you choose.
-- If history is disabled, Quick Ask does not save transcripts.
-- The encryption key is stored in macOS Keychain under the service name `local-chat-transcript-key`.
-- The app writes encrypted transcript files only. It does not write plaintext chat logs during normal use.
-- You can still override the transcript folder with `QUICK_ASK_SAVE_DIR` or disable history with `QUICK_ASK_DISABLE_HISTORY=1`.
+Model switch behavior:
 
-## Build
+- Switching model does not interrupt the in-flight turn.
+- Next turn uses the newly selected model.
+- A divider event is added in-thread:
+  `Changed model: <Old> -> <New>`
 
-From the repo root:
+## Providers And Models
+
+Quick Ask only shows models that are currently available and enabled.
+
+- `codex` provider models are filtered by live Codex app-server `model/list` availability.
+- `claude` and `gemini` appear when their CLIs are present and logged in.
+- `ollama` models are pulled live from Ollama (`/api/tags`), chat-only filtered.
+
+Default built-in cloud model options:
+
+- `Codex 5.3` (Codex app-server runtime)
+- `ChatGPT 5.4 Instant`
+- `ChatGPT 5.4 Medium`
+- `Claude Opus 4.6`
+- `Claude Sonnet 4.6`
+- `Gemini 3 Flash`
+- `Gemini Flash Lite`
+
+Model ordering:
+
+- Provider groups are ordered: `codex`, `claude`, `gemini`, `ollama`.
+- Within each provider group, ordering is dynamically weighted by usage in saved Quick Ask history, with a heavy recency bias (last 72 hours weighted most).
+
+To add local models, install them in Ollama (for example `ollama pull <model>`).
+
+## Coding Scope (Codex/Gemini)
+
+When a coding model is selected (`codex` or `gemini`), the model menu shows a `scope` section:
+
+- `Full Access` (default)
+- `<path>…` restricted directory mode (defaults to `~/Downloads`, can be changed via folder picker)
+
+Scope is persisted per app usage and saved with transcript metadata.
+
+Execution policy:
+
+- Codex Full Access uses dangerous full filesystem access mode.
+- Codex restricted uses workspace-write mode rooted at selected scope.
+- Gemini includes either home directory (full access) or selected restricted directory in its allowed directories.
+
+## Security And History
+
+History is optional. When enabled:
+
+- chats are encrypted before saving
+- encrypted session files are stored on disk
+- encryption key is stored in macOS Keychain under service `local-chat-transcript-key`
+- no plaintext transcript files are written during normal save flow
+
+Archive location:
+
+- default save root is `~/Library/Application Support/Quick Ask/sessions`
+- if Dropbox is detected, Quick Ask prefers a Dropbox `Quick Ask/sessions` path
+- settings can choose a custom archive folder
+- env override: `QUICK_ASK_SAVE_DIR`
+
+Disable history:
+
+- settings toggle, or
+- env flag: `QUICK_ASK_DISABLE_HISTORY=1`
+
+## Build And Install
+
+From repo root:
 
 ```zsh
 ./build-quick-ask
 ```
 
-That script:
+Build script behavior:
 
-- builds `Quick Ask.app`
-- installs it into `~/Applications`
-- bundles the Python backend and shared helper module
-- installs a LaunchAgent so the app starts at login
+- compiles `QuickAskApp.swift` into `~/Applications/Quick Ask.app`
+- copies backend files into app resources
+- installs/updates LaunchAgent `app.quickask.mac` (RunAtLoad + KeepAlive)
 
-## Usage
+Build without (re)bootstrapping LaunchAgent:
 
-1. Launch Quick Ask.
-2. If you want encrypted saved history, choose an archive folder in `Settings…`. If history is disabled, Quick Ask works without any archive setup.
-3. If you want remote providers, make sure you have already logged in through the relevant CLI:
-   - `claude auth login --claudeai`
-   - `codex login --device-auth`
-   - `gemini`
-4. Press `Cmd+\` to show or hide the panel.
-5. Type a prompt and press `Enter`.
-   You can also paste images directly into the input with `Cmd+V`.
-6. Use the model menu to switch providers or open `Settings…`.
-   You can also open `History` directly from that menu.
-7. Press `Cmd+Shift+\` to browse prior chats when history is enabled.
-8. Press `Cmd+,` to toggle the real Quick Ask settings window.
-9. Use the `Keyboard Shortcuts` button in settings for a compact shortcut reference.
+```zsh
+QUICK_ASK_SKIP_LAUNCH_AGENT=1 ./build-quick-ask
+```
 
-If at least one provider or local model is already available, Quick Ask does not block you on provider setup. Provider status in `Settings…` is informational and reusable, not an API-key onboarding flow.
+## Setup Requirements
 
-Image support notes:
+- macOS
+- Python 3
+- Xcode command line tools (`xcrun`, `swiftc`)
+- optional CLIs depending on providers you want:
+  - `claude`
+  - `codex`
+  - `gemini`
+  - `ollama`
+- `openssl` + Keychain access for encrypted history
 
-- Pasted images are forwarded to Claude, ChatGPT/Codex, Gemini, and Ollama models.
-- Quick Ask materializes pasted images as temporary local files for the CLI-backed providers that need file-path handoff.
+Typical provider login commands:
 
-Model switching semantics:
+- `claude auth login --claudeai`
+- `codex login --device-auth`
+- `gemini`
 
-- changing the selected model does not interrupt the reply already in flight
-- the next submitted turn uses the newly selected model
-- the current conversation history carries forward until you start a fresh chat
-- the conversation does not auto-clear while the panel is visible
-- if the panel stays dismissed for 45 seconds, Quick Ask clears the conversation automatically
+## Development And Testing
 
-## Repo Notes
-
-- Repo name: `quick-ask`
-- GitHub: `nftstory/quick-ask`
-- App name: `Quick Ask`
-- License: Apache-2.0 with Commons Clause (source-available; resale requires permission)
-
-## Development
-
-Run the UI suite with:
+UI harness tests:
 
 ```zsh
 python3 tests/test_quick_ask_ui.py -v
 ```
 
-The UI tests do not send real chat prompts to Claude, Codex, Gemini, or Ollama. They run the app in a test mode with stubbed generation so layout, queueing, setup gating, history, and shortcut behavior can be verified without burning inference tokens.
-
-Additional smoke tests:
+Backend and integration suites:
 
 ```zsh
 python3 tests/test_backend_env.py -v
 python3 tests/test_quick_ask_backend_images.py -v
+python3 tests/test_codex_app_server_backend.py -v
 python3 tests/test_fresh_install.py -v
+python3 tests/test_quick_ask_shared.py -v
 ```
 
-If you want to verify a clean install path without loading the LaunchAgent, you can build with:
+Notes:
 
-```zsh
-QUICK_ASK_SKIP_LAUNCH_AGENT=1 ./build-quick-ask
-```
+- UI tests run app in a test harness mode and do not invoke paid provider inference.
+- They validate layout, keyboard behavior, queueing, history, model selection, scope controls, and failure/retry states.
+
+## Repo
+
+- Repo: `quick-ask`
+- App name: `Quick Ask`
+- License: Apache-2.0 with Commons Clause
